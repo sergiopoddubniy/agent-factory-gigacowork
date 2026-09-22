@@ -33,8 +33,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from factory_common import (  # noqa: E402
     BLOCKS, EXIT_INPUT, EXIT_OK, EXIT_RED, HYPOTHESIS_FIELDS, REQUIRED_CASES,
-    STATUS_ASSUMED, STATUS_FILLED, STATUS_MISSING, Spec, case_ids, ears_lines,
-    hitl_rows, io_lists, nfc, parse_spec, rules, scope_lists,
+    STATUS_ASSUMED, STATUS_FILLED, STATUS_MISSING, Spec, case_ids, checklist,
+    checklist_items, ears_lines, hitl_rows, io_lists, nfc, parse_spec, rules, scope_lists,
 )
 
 # Блоки, которые для детерминированного класса не требуются ни на одном
@@ -140,12 +140,25 @@ def check(spec: Spec, threshold: str) -> dict:
             findings.append(_f("Ф-07-OUTSCOPE", 7, "нет списка «Out-of-scope:»",
                                "два-три соседних запроса, которые агент НЕ берёт"))
 
-    # --- Блок 8: правила --------------------------------------------------
+    # --- Блок 8: правила и чек-лист полноты --------------------------------
     b8 = spec.block(8)
     if pilot and b8.status != STATUS_MISSING and len(rules(b8)) < 3:
         findings.append(_f("Ф-08-МАЛО", 8, f"правил решений: {len(rules(b8))}",
                            "для пилота нужен реестр решений: признак, порог, что "
                            "делать при неоднозначности — не меньше трёх"))
+    if pilot and klass in ("ии-нативный", "агентный") and len(checklist(b8)) < 5:
+        findings.append(_f("Ф-08-ЧЕКЛИСТ", 8, f"пунктов чек-листа полноты: {len(checklist(b8))}",
+                           "для пилота нужен «Чек-лист полноты:» из ≥5 пунктов — это единица "
+                           "результата для реестра вопросов; без него реестр плавает "
+                           "между сессиями (output_stability, уровень 1)"))
+    if pilot and klass in ("ии-нативный", "агентный") and len(checklist(b8)) >= 5:
+        no_crit = [i for i, (_, c) in enumerate(checklist_items(b8), 1) if not c]
+        if no_crit:
+            findings.append(_f("Ф-08-КРИТЕРИЙ", 8,
+                               f"пункты чек-листа без критерия закрытия: {', '.join(map(str, no_crit))}",
+                               "каждому пункту — «— закрыто, если: <что должно быть названо в источнике>»; "
+                               "без критерия агент сам решает, закрыт ли пункт, и в двух сессиях решает "
+                               "по-разному (output_stability, уровень 4)"))
 
     # --- Блок 9: неопределённость (EARS) ----------------------------------
     b9 = spec.block(9)
@@ -167,6 +180,21 @@ def check(spec: Spec, threshold: str) -> dict:
         if pilot and rows and any(("?" in r[1]) or not r[1].strip() for r in rows):
             findings.append(_f("Ф-10-КТО", 10, "в HITL-карте не назван валидатор",
                                "колонка «Кто» — роль, а не знак вопроса"))
+
+    # --- Блок 11: коннекторы названы подмаркером, а не только словами ------
+    # Прогон на агенте консолидации (run4): блок 11 описывал подтверждённый
+    # коннектор исполнения кода абзацем, подмаркера «Коннекторы:» не было —
+    # и команда запуска ушла с «подтверждённые инструменты — нет».
+    b11 = spec.block(11)
+    if b11.status != STATUS_MISSING:
+        txt11 = " ".join(b11.lines)
+        has_marker = any(re.match(r"^\s*(?:\*\*)?Коннекторы(?:\*\*)?\s*:", ln) for ln in b11.lines)
+        if re.search(r"коннектор", txt11, re.I) and not has_marker:
+            findings.append(_f("Ф-11-КОННЕКТОР", 11,
+                               "коннектор упомянут словами, но строки «Коннекторы:» нет",
+                               "добавь в блок 11 строку «Коннекторы:» со списком "
+                               "`<имя> — <что даёт> — версия <x.y>` или «Коннекторы: нет» — "
+                               "из неё порождаются подтверждённые инструменты команды запуска"))
 
     # --- Блок 12: приёмочные случаи ---------------------------------------
     b12 = spec.block(12)

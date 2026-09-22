@@ -308,6 +308,8 @@ def steps(block: Block) -> list:
             on = True
             continue
         if on:
+            if re.match(r"^\s*(?:\*\*)?Чек-лист полноты(?:\*\*)?\s*:", ln, re.I):
+                break
             m = re.match(r"^\s*\d+[.)]\s+(.*)$", ln)
             if m:
                 out.append(m.group(1).strip())
@@ -316,12 +318,149 @@ def steps(block: Block) -> list:
     return out
 
 
+SUBMARKER_RE = re.compile(r"^\s*(?:\*\*)?(Шаги|Чек-лист полноты)(?:\*\*)?\s*:", re.I)
+
+
 def rules(block: Block) -> list:
-    """Правила решений: пункты списка до маркера «Шаги:»."""
+    """Правила решений: пункты списка до первого подмаркера («Шаги:»,
+    «Чек-лист полноты:»)."""
     out = []
     for ln in block.lines:
-        if re.match(r"^\s*(?:\*\*)?Шаги(?:\*\*)?\s*:", ln):
+        if SUBMARKER_RE.match(ln):
             break
         if re.match(r"^\s*[-*]\s+", ln):
             out.append(re.sub(r"^\s*[-*]\s+", "", ln).strip())
+    return out
+
+
+def checklist(block: Block) -> list:
+    """Чек-лист полноты (блок 8, подмаркер «Чек-лист полноты:»): пункты,
+    по одному на строку результата. Это единица результата для реестра
+    вопросов (output_stability, уровень 1): сколько пунктов — столько строк,
+    в любом прогоне."""
+    out, on = [], False
+    for ln in block.lines:
+        if re.match(r"^\s*(?:\*\*)?Чек-лист полноты(?:\*\*)?\s*:", ln, re.I):
+            on = True
+            continue
+        if on:
+            if SUBMARKER_RE.match(ln):
+                break
+            m = re.match(r"^\s*(?:\d+[.)]|[-*])\s+(.*)$", ln)
+            if m:
+                out.append(m.group(1).strip())
+            elif ln.strip() and not ln.startswith(" "):
+                break
+    return out
+
+
+CRITERION_RE = re.compile(r"\s+[—–-]\s+закрыто,?\s+если\s*:?\s+", re.I)
+
+
+def checklist_items(block: Block) -> list:
+    """Пункты чек-листа с критерием закрытия: [(пункт, критерий)]. Форма
+    пункта в спецификации — «<пункт> — закрыто, если: <критерий>». Критерий
+    решает неоднозначность заранее (output_stability, уровень 4): статус
+    `закрыто` ставится только по нему, косвенное упоминание в источнике
+    критерий не выполняет. Пункт без критерия — критерий пустая строка."""
+    out = []
+    for raw in checklist(block):
+        parts = CRITERION_RE.split(raw, maxsplit=1)
+        item = parts[0].strip().rstrip(".")
+        crit = parts[1].strip().rstrip(".") if len(parts) > 1 else ""
+        out.append((item, crit))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Расширения спецификации под целевой состав поставки (delivery_composition.md)
+# ---------------------------------------------------------------------------
+
+def cases(block: Block) -> list:
+    """Приёмочные случаи целиком: [{id, input, expect, features}].
+
+    Пункт блока 12: `` `id` — Вход: … → Ожидание: … · Признаки: есть: X; нет: Y ``.
+    «Признаки» — машинные признаки на языке `check_run.py` (deployed_agent_evals.md),
+    через точку с запятой; необязательны — сборщик подставит признаки по умолчанию
+    для обязательных случаев."""
+    out = []
+    for b in block.bullets():
+        m = re.match(r"^`([a-z0-9_]+)`\s*[—–-]\s*(.*)$", b)
+        if not m:
+            continue
+        cid, rest = m.group(1), m.group(2)
+        feats = []
+        fm = re.search(r"[·•]\s*Признаки\s*:\s*(.*)$", rest, re.I)
+        if fm:
+            rest = rest[:fm.start()].strip()
+            for chunk in re.split(r"\s*;\s*", fm.group(1).strip()):
+                mm = re.match(r"^([а-яa-z\-]+(?:>=)?)\s*:\s*(.*)$", chunk.strip(), re.I)
+                if mm:
+                    feats.append((mm.group(1).lower(), mm.group(2).strip()))
+        inp, _, exp = rest.partition("→")
+        inp = re.sub(r"^\s*Вход\s*:\s*", "", inp, flags=re.I).strip()
+        exp = re.sub(r"^\s*Ожидание\s*:\s*", "", exp, flags=re.I).strip()
+        out.append({"id": cid, "input": inp, "expect": exp, "features": feats})
+    return out
+
+
+def commands_list(block: Block) -> list:
+    """Команды агента из блока 6, подмаркер «Команды:». Пункт:
+    `<имя> — <описание> — Подать: <что> → Получить: <что>`.
+    Если подмаркера нет — команды только служебные (N.0 «Как со мной
+    работать» и N.1 запуск), их порождает сборщик."""
+    out = []
+    for ln in block.subsection("Команды"):
+        parts = [p.strip() for p in re.split(r"\s+[—–]\s+", ln)]
+        name = parts[0] if parts else ln
+        desc = parts[1] if len(parts) > 1 else ""
+        give, get = "", ""
+        for p in parts[2:]:
+            m = re.match(r"^Подать\s*:\s*(.*?)(?:\s*→\s*Получить\s*:\s*(.*))?$", p, re.I)
+            if m:
+                give, get = m.group(1).strip(), (m.group(2) or "").strip()
+        if name:
+            out.append({"name": name, "desc": desc, "give": give, "get": get})
+    return out
+
+
+def kb_files(block: Block) -> list:
+    """Состав базы знаний пространства — блок 6, подмаркер «База знаний:».
+    Пункт: `<имя файла> — <что это и откуда взять>`. Это то, что грузится в
+    пространство ДО первой задачи (методика, шаблоны, справочники) — в
+    отличие от входов, которые приносит пользователь с каждым запросом."""
+    out = []
+    for ln in block.subsection("База знаний"):
+        name, _, desc = ln.partition(" — ")
+        out.append({"file": name.strip().strip("`"), "desc": desc.strip()})
+    return out
+
+
+def workspace_skills(block: Block) -> list:
+    """Навыки пространства (коннекторы и общие навыки), от которых зависит
+    агент — блок 11, подмаркер «Навыки пространства:». Пункт: `<имя навыка>
+    — <зачем>`. Порождает раздел 0 навыка и блок активации карточки
+    (agent_package.md, «0. Обязательная активация навыков»)."""
+    out = []
+    for ln in block.subsection("Навыки пространства"):
+        if re.match(r"^(нет|отсутствуют|не требуются|—)\b", ln.strip(), re.I):
+            continue
+        name, _, why = ln.partition(" — ")
+        name = name.strip().strip("«»\"'`")
+        if name:
+            out.append({"name": name, "why": why.strip()})
+    return out
+
+
+def connectors(block: Block) -> list:
+    """Коннекторы — блок 11, подмаркер «Коннекторы:». Пункт: `<имя> — <что
+    даёт> — версия <x.y>`; «нет» или пустой список — коннекторов нет, и это
+    решение сборщик пишет в карточку явно."""
+    out = []
+    for ln in block.subsection("Коннекторы"):
+        if re.match(r"^(нет|отсутствуют|не требуются)\b", ln.strip(), re.I):
+            continue
+        parts = [p.strip() for p in re.split(r"\s+[—–]\s+", ln)]
+        out.append({"name": parts[0].strip("`«»\"'"), "what": parts[1] if len(parts) > 1 else "",
+                    "version": next((p for p in parts[2:] if re.search(r"верси", p, re.I)), "")})
     return out

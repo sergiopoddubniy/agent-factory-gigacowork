@@ -1,0 +1,8 @@
+{
+  "spec": "demo-1c-dev-assistant",
+  "fingerprint": "6ba73507",
+  "version": "V5",
+  "sha256": "e6edf4bffec932b87069b4c0ac8b1575605eb47b81bbc1376eef4082637935f3",
+  "audit": "PASS",
+  "delivery": "PASS (ядро 55/55, надстройка «демонстрация» 11/11)"
+}

@@ -1,243 +1,3020 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Сверка собранного комплекта с целевым составом поставки.
+
+Целевой состав — references/delivery_composition.md, единственный источник.
+Этот скрипт проверяет уровень КОМПЛЕКТА: собран ли он целиком.
+Он не заменяет structural audit (уровень одного пакета) и не заменяет
+platform runtime validation (уровень платформы).
+
+    python3 check_delivery.py --папка <путь> --задача демонстрация \
+        --поколение 2 [--расчётная] [--агентов N]
+
+Коды выхода: 0 — PASS, 1 — есть FAIL.
 """
-check_delivery.py — структурный аудит пакета агента GigaCowork.
-
-Проверяет пакет в единственно допустимой структуре:
-
-    <agent-slug>/
-    ├── commands/run-agent.md
-    └── skills/00-agent-skill/SKILL.md
-
-Правила те же, что в исходном скилле gigacowork-agent-scenario
-(build_agent_package.py, редакция 25.08): фронтматтер навыка повторяет
-форму «Создать навык» платформы; семнадцать разделов ищутся как заголовки,
-а не как подстроки; восемь quality gates; пять обязательных acceptance
-cases; конвенция SIM_TOOL_CALL / SIM_TOOL_RESULT; external_write=false;
-команда активирует навык по имени и задаёт «Контур».
-
-Дополнительно к исходному скиллу: пакет несёт ссылку на спецификацию
-(`спецификация: <id> · <версия> · <отпечаток>`) — так пакет проверяемо
-порождён из спецификации, а не написан параллельно ей.
-
-Код возврата: 0 — PASS, 1 — FAIL, 2 — ошибка входа.
-
-    python3 check_delivery.py --package <папка agent-slug> [--spec AGENT_SPEC.md] [--json]
-"""
-from __future__ import annotations
-
 import argparse
-import json
+import hashlib
 import re
 import sys
+import unicodedata
+import zipfile
+from fnmatch import fnmatch
 from pathlib import Path
 
+# Стеммер и токенизатор — из общего модуля, а не своей копией: правило отказа
+# пишется прозой и называет навык в косвенном падеже, сравнивать приходится по
+# основам. Вторая копия стеммера разошлась бы с первой при первой же правке —
+# это ровно тот дефект, который в скилле записан правилом «два описания одного
+# и того же»; selftest отдельно следит, что `основа` определена в одном файле.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from factory_common import EXIT_INPUT, EXIT_OK, EXIT_RED, nfc, parse_spec  # noqa: E402
+from textnorm import токены                      # noqa: E402  общий источник
 
-REQUIRED_SECTIONS = [
-    "Назначение", "Пользователь и триггер", "In-scope", "Out-of-scope",
-    "Входные данные", "Внутренние модули выполнения", "Порядок выполнения",
-    "Форматы выходных артефактов", "Правила доказательности",
-    "Работа с неопределённостью", "HITL_REQUIRED", "Demo-режим",
-    "Защита данных", "Quality gates", "acceptance cases",
-    "Ограничения pilot / production", "Формат итогового ответа",
-]
-REQUIRED_GATES = ["scope_check", "input_check", "source_check", "consistency_check",
-                  "output_check", "safety_check", "demo_check", "handoff_check"]
-REQUIRED_CASES = ["happy_path", "missing_required_input", "conflicting_sources",
-                  "prompt_injection_in_document", "external_action_without_confirmation"]
-FORBIDDEN_NAMES = {"readme.md", "agents.md", "manifest.md", "checksums.sha256",
-                   "package_audit.md", "system_prompt_for_agent_builder.md"}
-FORBIDDEN_DIR_PREFIXES = ("workflow", "policy", "policies", "template", "templates",
-                          "eval", "evals", "schema", "schemas", "demo", "script", "scripts")
-SLUG_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+nfc = lambda s: unicodedata.normalize("NFC", s)
+# для имён файлов: подчёркивания/дефисы/пробелы — одно и то же
+nameflat = lambda s: re.sub(r"[\s_\-]+", " ", nfc(s)).lower().replace("ё", "е")
+# для текста: подчёркивания ЗНАЧИМЫ (идентификаторы), схлопываем только пробелы
+flat = lambda s: re.sub(r"\s+", " ", nfc(s)).lower().replace("ё", "е")
+
+RESULTS = []
+# Код проверки не зависит от формулировки сообщения: находки прогонов и записи
+# журнала ссылаются на код, а текст сообщения правится свободно. Реестр нужен,
+# чтобы два разных нарушения не получили один код молча.
+КОДЫ: dict[str, str] = {}
 
 
-def frontmatter(text: str) -> str | None:
-    if not text.lstrip().startswith("---"):
+def resolve_root(raw: str):
+    """Путь в трёх формах Unicode: как дан, NFC, NFD.
+
+    macOS хранит имена файлов в NFD, а путь, скопированный из документа или
+    из вывода другого скрипта, обычно приходит в NFC. Нормализация «на всякий
+    случай» в одну сторону уже приводила к тому, что готовый пакет уезжал в
+    папку-двойник и клиент его не видел.
+    """
+    if not raw or not raw.strip():
         return None
-    parts = text.lstrip().split("---", 2)
-    return parts[1] if len(parts) >= 3 else None
+    for cand in (raw, unicodedata.normalize("NFC", raw),
+                 unicodedata.normalize("NFD", raw)):
+        p = Path(cand)
+        if p.is_dir() and str(p) not in (".", ""):
+            # Абсолютный путь: относительный с «..» давал в обходе части «..»,
+            # которые фильтр скрытых («.»-префикс) выбрасывал вместе со всеми
+            # файлами — и комплект выглядел пустым (найдено фабрикой при
+            # запуске из соседней папки).
+            return p.resolve()
+    return None
 
 
-def skill_frontmatter_problems(text: str) -> list:
-    fm = frontmatter(text)
-    if fm is None:
-        return ["SKILL.md: нет YAML-фронтматтера"]
-    fm = nfc(fm)
-    problems = []
-    name = re.search(r'^\s*имя навыка:\s*["\']?(.+?)["\']?\s*$', fm, re.M | re.I)
-    if not name:
-        problems.append("SKILL.md: нет поля «имя навыка» (обязательное поле формы «Создать навык»)")
-    elif not re.search(r"[А-Яа-яЁё]", name.group(1)):
-        problems.append(f"SKILL.md: «имя навыка: {name.group(1)}» — имя видит пользователь в "
-                        "каталоге, оно должно быть на его языке, а не слагом")
-    when = re.search(r"^\s*когда применять:\s*(.*)$", fm, re.M | re.I)
-    if not when:
-        problems.append("SKILL.md: нет поля «когда применять» — по нему агент решает, брать навык или нет")
-    else:
-        body = when.group(1).strip().lstrip("|>-").strip() or fm[when.end():].strip()
-        if len(body) < 80:
-            problems.append("SKILL.md: «когда применять» короче 80 знаков — это условие отбора, "
-                            "а не пересказ названия")
-        elif "не бери" not in body.lower() and "не брать" not in body.lower():
-            problems.append("SKILL.md: «когда применять» без второй части «Не бери навык, если …» — "
-                            "навык без границ подхватывается на соседних запросах")
-    if re.search(r"^\s*summary:", fm, re.M):
-        problems.append("SKILL.md: поле «summary» в форме платформы отсутствует и расходится с "
-                        "«когда применять»")
-    if not re.search(r"^\s*id:\s*[a-z0-9]+(-[a-z0-9]+)+\s*$", fm, re.M):
-        problems.append("SKILL.md: нет ключа id вида <клиент>-<джоба>")
-    if not re.search(r"^\s*версия агента:\s*V\d+", fm, re.M | re.I):
-        problems.append("SKILL.md: нет поля «версия агента: V<N>» (Я20)")
-    if not re.search(r"^\s*обновлено:\s*\d{4}-\d{2}-\d{2}", fm, re.M | re.I):
-        problems.append("SKILL.md: нет поля «обновлено: ГГГГ-ММ-ДД»")
-    if not re.search(r"^\s*спецификация:\s*\S+", fm, re.M | re.I):
-        problems.append("SKILL.md: нет ссылки на спецификацию «спецификация: <id> · <версия> · "
-                        "<отпечаток>» — пакет должен быть порождён из спецификации")
-    return problems
+def chk(level: str, name: str, ok: bool, why: str = "",
+        код: str | None = None, мягкая: bool = False) -> None:
+    """Результат проверки.
+
+    `мягкая=True` — проверка идёт в шкалу качества, а не в жёсткие ворота.
+    Жёсткое не усредняется: вердикт считается как
+    `Accept = (⋀ жёсткие) ∧ (качество ≥ порог)`, и никакое количество мелких
+    зелёных не перевешивает один жёсткий провал.
+    """
+    if код:
+        # Код опознаёт РОД проверки, а имя агента — её предмет. Проверка,
+        # идущая по каждому агенту, называется «„<папка>“: …», и без снятия
+        # предмета код выглядел бы занятым семь раз подряд — то есть
+        # уникальность кода превратилась бы в запрет на проверки по агентам.
+        род = re.sub(r"^«[^»]+»:\s*", "", name)
+        прежнее = КОДЫ.get(код)
+        if прежнее is not None and прежнее != род:
+            RESULTS.append(("КОД", f"код «{код}» занят двумя проверками", False,
+                            f"«{прежнее}» и «{род}» — код обязан быть "
+                            "уникальным, иначе ссылка в журнале двусмысленна",
+                            False))
+        КОДЫ[код] = род
+    RESULTS.append((level, name, bool(ok), why, bool(мягкая)))
 
 
-def command_has_frontmatter(text: str) -> bool:
-    fm = frontmatter(text)
-    if fm is None:
-        return False
-    return (re.search(r'^\s*name:\s*["\']?run-agent["\']?\s*$', fm, re.M) is not None
-            and "version:" in fm and "summary:" in fm)
+# ─────────────────────────── обход дерева ───────────────────────────
+
+# Помеченное к удалению — тоже «не поставка»: файл, который человек уже
+# решил убрать, не должен считаться вторым экземпляром артефакта. Из
+# обхода он исключается, но не исчезает: его показывает проверка «Ч»,
+# и пока он лежит в комплекте, комплект не передаётся.
+ARCHIVE = ("архив", "_old", "old_", "черновик", "draft", "устарел", "backup_",
+           "к_удалению", "к удалению", "дубль", "переехало")
 
 
-def audit_texts(skill_text: str, command_text: str, slug: str) -> dict:
-    findings, missing_sections, notes = [], [], []
-    skill_text, command_text = nfc(skill_text), nfc(command_text)
-    if not SLUG_RE.match(slug):
-        findings.append(f"slug «{slug}» не в kebab-case (латиница, дефисы)")
-    findings.extend(skill_frontmatter_problems(skill_text))
-    if not command_has_frontmatter(command_text):
-        findings.append("run-agent.md: отсутствует или неполный фронтматтер (name: run-agent, summary, version)")
-
-    low = skill_text.lower()
-    headings = [re.sub(r"^#+\s*(\d+[.)]\s*)?", "", ln).strip().lower()
-                for ln in low.splitlines() if ln.lstrip().startswith("#")]
-    for section in REQUIRED_SECTIONS:
-        s = nfc(section).lower()
-        if not any(s in h for h in headings):
-            missing_sections.append(section)
-    if missing_sections:
-        findings.append("SKILL.md: не найдено разделов — " + ", ".join(missing_sections))
-
-    missing_gates = [g for g in REQUIRED_GATES if g not in skill_text]
-    if missing_gates:
-        findings.append("SKILL.md: отсутствуют quality gates — " + ", ".join(missing_gates))
-    missing_cases = [c for c in REQUIRED_CASES if c not in skill_text]
-    if missing_cases:
-        findings.append("SKILL.md: отсутствуют acceptance cases — " + ", ".join(missing_cases))
-    if "SIM_TOOL_CALL" not in skill_text or "SIM_TOOL_RESULT" not in skill_text:
-        findings.append("SKILL.md: не описана конвенция SIM_TOOL_CALL / SIM_TOOL_RESULT")
-    if "external_write" not in skill_text:
-        findings.append("SKILL.md: не задан external_write=false для demo-контура")
-    for marker in ("missing_data", "conflict_requires_review", "HITL_REQUIRED"):
-        if marker not in skill_text:
-            findings.append(f"SKILL.md: нет маркера {marker}")
-
-    skill_h1 = re.search(r"^#\s+(.+)$", skill_text, re.M)
-    name = skill_h1.group(1).strip().strip("«»\"'") if skill_h1 else None
-    activates = "активируй навык" in command_text.lower()
-    names_it = bool(name) and name.lower() in command_text.lower()
-    if not activates:
-        findings.append("run-agent.md: команда не активирует навык — нет блока «Активируй навык …»")
-    elif not names_it and "skills/00-agent-skill/SKILL.md" not in command_text:
-        findings.append(f"run-agent.md: команда не называет навык по имени «{name}»")
-    if "Контур" not in command_text:
-        findings.append("run-agent.md: не задан параметр «Контур»")
-
-    for word in ("интеграция подключена", "write-back выполнен", "данные записаны в"):
-        if word in low:
-            notes.append(f"проверь формулировку: «{word}» может читаться как обещание реальной интеграции")
-    return {"status": "FAIL" if findings else "PASS", "findings": findings,
-            "missing_sections": missing_sections, "notes": notes}
+def is_archive(p: Path) -> bool:
+    return any(a in nameflat(part) for part in p.parts for a in ARCHIVE)
 
 
-def check_tree(root: Path) -> list:
-    problems = []
-    allowed = {Path("commands/run-agent.md"), Path("skills/00-agent-skill/SKILL.md")}
-    for p in sorted(root.rglob("*")):
-        rel = p.relative_to(root)
-        if p.is_dir():
-            if rel.parts[0] not in ("commands", "skills"):
-                problems.append(f"лишний каталог: {rel}")
-            elif rel.parts[0] == "skills" and len(rel.parts) == 2 and rel.parts[1] != "00-agent-skill":
-                problems.append(f"лишний вложенный каталог: {rel}")
-            elif len(rel.parts) > 2:
-                problems.append(f"лишний вложенный каталог: {rel}")
+def walk(root: Path):
+    """Обход без архивов и черновиков.
+
+    Архив внутри поставки не просто занимает место: администратор может
+    загрузить в пространство старую версию базы знаний, и агент получит два
+    описания одного и того же. Поэтому архивы исключаются из обхода и
+    выносятся отдельной проверкой, а не тихо игнорируются.
+    """
+    files, dirs, arch = [], [], []
+    for p in root.rglob("*"):
+        if any(part.startswith(".") for part in p.parts):
             continue
-        if rel in allowed:
+        if is_archive(p.relative_to(root)):
+            arch.append(p)
             continue
-        if p.name.lower() in FORBIDDEN_NAMES or any(rel.parts[0].lower().startswith(x)
-                                                    for x in FORBIDDEN_DIR_PREFIXES):
-            problems.append(f"запрещённый файл: {rel}")
-        else:
-            problems.append(f"лишний файл: {rel}")
-    for need in allowed:
-        if not (root / need).is_file():
-            problems.append(f"нет обязательного файла: {need}")
-    return problems
+        (dirs if p.is_dir() else files).append(p)
+    return files, dirs, arch
 
 
-def spec_link_problems(skill_text: str, spec_path: Path | None) -> list:
-    """Пакет ссылается на спецификацию отпечатком; если дана спецификация —
-    отпечаток обязан совпадать, иначе пакет собран не из неё."""
-    if spec_path is None:
+def any_name(items, *needles) -> bool:
+    """Есть элемент, в имени которого встречается любая из подстрок."""
+    ns = [nameflat(n) for n in needles]
+    return any(any(n in nameflat(p.name) for n in ns) for p in items)
+
+
+def find_dirs(dirs, *needles):
+    ns = [nameflat(n) for n in needles]
+    return [d for d in dirs if any(n in nameflat(d.name) for n in ns)]
+
+
+def is_skill(p: Path) -> bool:
+    """Файл навыка. Имя может быть и `SKILL.md`, и `00_Навык_<slug>.md`.
+
+    Переименование навыка в папке агента (чтобы он был читаем и различим
+    среди семи одинаковых `SKILL.md`) едва не сломало четыре проверки разом:
+    все они опознавали навык по одному фиксированному имени. Признак вынесен
+    сюда, чтобы такого «переименовали здесь, а искали там» больше не было.
+    """
+    n = nameflat(p.name)
+    return n == "skill.md" or (n.startswith("00 навык") and p.suffix == ".md")
+
+
+# ───────────────── имя навыка: одно чтение на все проверки ─────────────────
+
+ПОЛЕ_ИМЕНИ = re.compile(r"^\s*(имя навыка|name)\s*:\s*(.+?)\s*$", re.M | re.I)
+
+
+def имя_навыка(текст: str) -> tuple[str | None, str | None]:
+    """(имя, каким полем объявлено). Запасного варианта нет намеренно.
+
+    Навыки поставки объявляют имя ДВУМЯ разными полями: заведённый через
+    форму «Создать навык» — полем `имя навыка:`, приехавший из шаблона
+    Claude-скилла — полем `name:`. Читатель, знавший одно поле, для второго
+    навыка молча падал на запасной вариант «имя папки» — и проверка
+    проходила СЛУЧАЙНО, потому что папка называлась почти так же. Находка
+    Н-1 в чистом виде: проверка, которой достаточно совпадения имён на
+    диске, не проверяет активацию.
+
+    Запасного варианта здесь поэтому нет. Имя папки человек в форму
+    платформы не вводит; проверка, которой его хватает, зелена и на
+    комплекте, где имя не объявлено вовсе.
+
+    `имя навыка:` старше по приоритету: это поле формы, а `name:` в шаблоне
+    держит слаг пакета.
+    """
+    т = nfc(текст)
+    части = т.split("---", 2)
+    голова = части[1] if т.lstrip().startswith("---") and len(части) > 2 else т
+    найдено: dict[str, str] = {}
+    for m in ПОЛЕ_ИМЕНИ.finditer(голова):
+        найдено.setdefault(m.group(1).lower(), m.group(2).strip('"\'«» '))
+    for поле in ("имя навыка", "name"):
+        if найдено.get(поле):
+            return найдено[поле], поле
+    return None, None
+
+
+def имя_слагом(имя: str) -> bool:
+    """Значение поля — слаг пакета, а не имя навыка для формы платформы.
+
+    `name: 4_seo-page-optimizer` — это имя каталога, из которого приехал
+    шаблон. Человек, заполняющий форму «по фронтматтеру», вставит в поле
+    «Имя навыка» именно его, а карточка потребует активировать русское имя:
+    агент такого навыка не найдёт и об этом не скажет.
+    """
+    return not re.search(r"[А-Яа-яЁё]", имя)
+
+
+ВЕРСИЯ_СТРОКА = re.compile(
+    r"версия(?:\s+агента)?\s*:?\s*\**\s*[Vv](\d+)", re.I)
+ДАТА_СТРОКА = re.compile(
+    r"(?:обновлено|дата)\s*:?\s*\**\s*"
+    r"(\d{4}-\d{2}-\d{2}|\d{2}[.\-/]\d{2}[.\-/]\d{2,4})", re.I)
+
+
+def версия_артефакта(текст: str):
+    """Версия и дата из шапки артефакта: (`V3`, `2026-09-03`) либо None.
+
+    Смотрится только начало файла — первые 40 строк. Дальше по тексту слово
+    «версия» встречается в другом смысле: «версия коннектора», «предыдущая
+    версия», разбор изменений. Проверка, которой достаточно слова где угодно
+    в файле, проверяет словарь, а не артефакт.
+
+    Поле `version: 1.0.0` во фронтматтере версией агента НЕ считается: это
+    константа шаблона платформы, она не менялась ни разу за семь агентов.
+    """
+    шапка = "\n".join(nfc(текст).splitlines()[:40])
+    v = ВЕРСИЯ_СТРОКА.search(шапка)
+    d = ДАТА_СТРОКА.search(шапка)
+    if not v or not d:
+        return None
+    return (f"V{v.group(1)}", d.group(1))
+
+
+def read_text(p: Path) -> str:
+    try:
+        return p.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def kb_units(kb: Path):
+    """Единицы базы знаний, у каждой из которых должна быть карта состава.
+
+    Портфель и пилот кладут по папке на агента внутрь общей папки базы
+    знаний; одиночный агент — файлы прямо в ней. Карта состава нужна на
+    каждой такой единицу, а не одна на всё: агент читает свою папку.
+    """
+    subs = [d for d in kb.iterdir()
+            if d.is_dir() and not d.name.startswith(".")
+            and any(f.is_file() for f in d.rglob("*"))]
+    return subs or [kb]
+
+
+def zip_names(p: Path):
+    try:
+        with zipfile.ZipFile(p) as z:
+            return [nfc(n) for n in z.namelist()]
+    except Exception:
         return []
-    fm = frontmatter(nfc(skill_text)) or ""
-    m = re.search(r"^\s*спецификация:\s*(\S+)\s*·\s*(\S+)\s*·\s*([0-9a-f]{8})", fm, re.M | re.I)
+
+
+
+# ─────────────────── связность комплекта: граф и отношения ───────────────────
+#
+# Уровень, которого у Я1–Я18 нет по построению. Они — локальные контракты:
+# каждый проверяет один артефакт. Установленный результат: из выполнения всех
+# локальных контрактов НЕ следует согласованность пакета — разобранный релиз
+# прошёл 417 проверок из 417 и содержал артефакты, противоречащие друг другу
+# (arXiv:2607.14155). Здесь проверяются ОТНОШЕНИЯ между артефактами.
+
+ССЫЛКА = re.compile(r"[`\[(]([^`\[\]()\n]{3,120}?\.(?:md|docx|xlsx|pdf|zip|csv))[`\])]")
+# Имена, которые в клиентском комплекте законно ведут наружу: файлы самого
+# скилла и общие обозначения. Ссылка на них — не дефект комплекта.
+СНАРУЖИ = ("skill.md", "readme.md", "claude.md", "agents.md",
+           "check delivery.py", "references/", "scripts/")
+
+
+def слаг(имя_папки: str) -> str:
+    """Slug агента из имени папки: номер и версия — не он.
+
+    «4_seo-page-optimizer_V2_21.08.26» → «seo-page-optimizer». Без отбрасывания
+    версии сопоставление с картой джоб и с текстами инструкции промахивается:
+    в них пишут slug, а не имя папки со сборочным суффиксом.
+    """
+    s = re.sub(r"^\d+[_\- ]*", "", nfc(имя_папки)).strip()
+    return re.sub(r"[_\- ]*[Vv]\d+(?:[_\- ]*\d{2}[.\-]\d{2}[.\-]\d{2,4})?$",
+                  "", s).strip()
+
+
+# ─────────────────────────── граф ВЫЗОВОВ ───────────────────────────
+#
+# Граф выше — граф ДОКУМЕНТОВ: ребро существует там, где один файл ссылается
+# на другой именем файла. Активация устроена иначе: агент зовёт навык ПО
+# ИМЕНИ в прозе карточки, и такое ребро граф документов не видит вовсе.
+#
+# Повод: в поставке ПТМ карточка требовала активировать «Разбор тендерной
+# документации», навык лежал рядом, ссылок между ними не было ни одной — и ни
+# одна проверка не могла сказать, резолвится имя или нет. Оба дефекта
+# активации, найденные 13.09, нашлись чтением глазами, а не прогоном.
+#
+# Здесь три детерминированных предиката на это ребро: имя резолвится, счёт
+# шагов сходится, у каждого зовомого навыка есть правило отказа.
+
+ЗАГОЛОВОК = re.compile(r"^(#{1,4})\s+(.+?)\s*$", re.M)
+ИМЯ_В_КАВЫЧКАХ = re.compile(r"[«\"]([^»\"\n]{3,80})[»\"]")
+ПУНКТ_СПИСКА = re.compile(r"^\s*(?:\d+[.)]|[-*+])\s+\S")
+
+# Навыки платформы: они есть в пространстве всегда и в поставку не входят.
+# Требовать, чтобы «Знания пространства» лежали файлом в комплекте, значит
+# требовать положить туда платформу.
+ВСТРОЕННЫЕ = ("знания пространства", "файлы воркспейса", "полнотекстовый поиск",
+              "работа с word", "работа с excel", "работа с pdf",
+              "работа с powerpoint", "веб поиск", "поиск в интернете",
+              "работа с изображениями", "генерация изображений")
+
+ЧИСЛИТЕЛЬНЫЕ = {
+    "один": 1, "одного": 1, "одному": 1, "одним": 1, "одна": 1, "одну": 1,
+    "два": 2, "две": 2, "двух": 2, "двум": 2, "двумя": 2,
+    "три": 3, "трех": 3, "трем": 3, "тремя": 3,
+    "четыре": 4, "четырех": 4, "четырем": 4, "четырьмя": 4,
+    "пять": 5, "пяти": 5, "пятью": 5,
+    "шесть": 6, "шести": 6, "шестью": 6,
+    "семь": 7, "семи": 7, "семью": 7,
+    "восемь": 8, "восьми": 8, "восемью": 8, "восьмью": 8,
+    "девять": 9, "девяти": 9, "девятью": 9,
+    "десять": 10, "десяти": 10, "десятью": 10,
+    "одиннадцать": 11, "одиннадцати": 11,
+    "двенадцать": 12, "двенадцати": 12,
+}
+_ЧИСЛА = "|".join(sorted(ЧИСЛИТЕЛЬНЫЕ, key=len, reverse=True))
+
+# «У всех семи агентов», «каждому из четырёх агентов» — объявление состава
+# портфеля прозой. Счёт берётся из папок, а не из фразы.
+СЧЁТ_АГЕНТОВ = re.compile(
+    rf"(?:у\s+)?(?:всех|все|каждого из|каждому из|каждый из|один из|"
+    rf"единственный из|одна из|одно из)\s+({_ЧИСЛА}|\d+)\s+агент\w*")
+# «У каждого агента есть подпапка `проверка/`» — обещание, у которого есть
+# предмет в обратных кавычках; без предмета проверять нечего.
+У_КАЖДОГО = re.compile(
+    r"у\s+\*{0,2}кажд\w+\*{0,2}\s+агент\w*\s+(?:есть|лежит|своя|свой)\s*"
+    r"[^`\n]{0,40}`([^`\n]{3,60})`", re.I)
+
+
+def блок_активации(текст: str) -> str:
+    """Раздел, из которого агент узнаёт, что активировать.
+
+    В карточке это «## Инструкция» — поле формы, которое платформа кладёт
+    агенту в системную подсказку; в навыке — раздел с «активацией» в
+    заголовке. Искать по всему файлу нельзя: имя навыка встречается и в
+    описании, и в перечне рекомендуемых, и проверка на них проходила, пока
+    блок активации звал другое имя.
+    """
+    т = nfc(текст)
+    г = [(m.start(), m.end(), len(m.group(1)), m.group(2))
+         for m in ЗАГОЛОВОК.finditer(т)]
+    for i, (нач, кон, ур, загл) in enumerate(г):
+        h = nameflat(загл)
+        if "инструкция" not in h and "актив" not in h:
+            continue
+        конец = len(т)
+        for нач2, _, ур2, _ in г[i + 1:]:
+            if ур2 <= ур:
+                конец = нач2
+                break
+        return т[кон:конец]
+    return ""
+
+
+def _склеить_кавычки(строки: list[str]) -> list[str]:
+    """Имя, разорванное переносом строки, собирается обратно.
+
+    Длинные имена агентов ATI.SU не помещаются в строку, и кавычка
+    открывается на одной, а закрывается на следующей. Построчный разбор
+    доставал из такого «имя» огрызок — «„Рассчитаться в сети» — и требовал
+    от поставки навык с таким названием.
+    """
+    склеено, буфер = [], ""
+    for ln in строки:
+        буфер = (буфер + " " + ln.strip()).strip() if буфер else ln
+        if буфер.count("«") > буфер.count("»"):
+            continue                      # кавычка ещё не закрыта
+        склеено.append(буфер)
+        буфер = ""
+    if буфер:
+        склеено.append(буфер)
+    return склеено
+
+
+def вызовы_активации(блок: str) -> tuple[list[str], int | None]:
+    """(какие навыки зовут, сколько пунктов в списке активации).
+
+    Число пунктов возвращается только тогда, когда список действительно про
+    активацию — то есть из него вычитались имена навыков. В карточках
+    ATI.SU активация написана прозой, а ниже в том же поле идёт нумерованный
+    список рабочих шагов: посчитав его, проверка объявила бы «пунктов 5, а
+    сказано два» на исправном комплекте.
+    """
+    строки, это_список = шаги_активации(блок)
+    имена = зовомые_навыки(строки)
+    if имена:
+        return имена, (len(строки) if это_список else None)
+    проза = [ln for ln in _склеить_кавычки(блок.splitlines())
+             if "актив" in nameflat(ln)]
+    return зовомые_навыки(проза), None
+
+
+def шаги_активации(блок: str) -> tuple[list[str], bool]:
+    """Строки, в которых объявлены вызовы, и признак «это список».
+
+    Пункт списка — единственная форма, в которой вызов отделён от прозы.
+    Проза вокруг называет те же навыки в косвенных падежах («без „Работы с
+    данными Seldon“»), и по ней вызовы считать нельзя: получилось бы, что
+    агент активирует один навык трижды.
+
+    Карточка агента без навыков пространства обходится одной фразой —
+    «Активируй навык „…“»; список из одного пункта там никто не пишет.
+
+    Списков в блоке бывает несколько: за шагами активации идут «чего нет
+    больше нигде» по пункту на навык, правила работы, порядок цикла.
+    Берётся тот, у которого ЗАЧИН говорит про активацию: «до любого
+    действия активируй по порядку:». Без этого признака на комплекте MGC
+    вышло «пунктов 5, а сказано три», а на карточке ATI.SU шагами
+    активации оказались пять шагов рабочего цикла.
+    """
+    строки = блок.splitlines()
+    блоки: list[tuple[str, list[str]]] = []
+    зачин, тек, пункты, состояние, значащая = "", None, [], "до", ""
+    for ln in строки:
+        маркер = bool(ПУНКТ_СПИСКА.match(ln))
+        пусто = not ln.strip()
+        if состояние == "до":
+            if маркер:
+                состояние, тек, пункты, зачин = "в списке", ln.strip(), [], значащая
+            elif not пусто:
+                значащая = ln
+            continue
+        if маркер:
+            if тек is not None:
+                пункты.append(тек)
+            тек = ln.strip()
+        elif пусто:
+            if тек is not None:
+                пункты.append(тек)
+                тек = None
+        elif ln.startswith((" ", "\t")) and тек is not None:
+            тек += " " + ln.strip()          # перенос строки внутри пункта
+        else:
+            if тек is not None:
+                пункты.append(тек)
+            блоки.append((зачин, пункты))
+            тек, пункты, состояние, значащая = None, [], "до", ln
+    if тек is not None:
+        пункты.append(тек)
+    if пункты:
+        блоки.append((зачин, пункты))
+    for зачин, пункты in блоки:
+        з = nameflat(зачин)
+        if пункты and ("актив" in з or "навык" in з):
+            return _склеить_кавычки(пункты), True
+    return [ln for ln in _склеить_кавычки(строки)
+            if "актив" in nameflat(ln)], False
+
+
+def зовомые_навыки(строки) -> list[str]:
+    """Имена в кавычках из шагов активации, по порядку и без повторов.
+
+    Из каждого шага берётся ПЕРВОЕ имя в кавычках, а не все. Шаг устроен
+    одинаково — «навык „Имя“ — зачем он нужен», — и пояснение после тире
+    само бывает в кавычках: «чем пустой ответ отличается от „ничего не
+    найдено“». Собирая все кавычки подряд, проверка требовала от поставки
+    навык «ничего не найдено» — красное на исправном комплекте ATI.SU.
+    """
+    имена: list[str] = []
+    for ln in строки:
+        if ln.lstrip().startswith(">"):
+            continue                 # цитата-примечание сборщику, не шаг
+        зн = _имя_из_строки(ln)
+        if not зн or any(в in nameflat(зн) for в in ВСТРОЕННЫЕ):
+            continue
+        if not any(nameflat(зн) == nameflat(x) for x in имена):
+            имена.append(зн)
+    return имена
+
+
+БЕЗ_КАВЫЧЕК = re.compile(r"актив\w*[^\n]{0,40}?навык[а-яё]*\s+(.+)$", re.I)
+
+
+def _имя_из_строки(ln: str) -> str | None:
+    """Имя навыка из одного шага активации — в кавычках или без них.
+
+    Две живые конвенции: ПТМ и MGC берут имя в кавычки, ATI.SU пишет его
+    голым текстом — «Активируй навык Работа с данными ATI.SU». Читатель,
+    знающий только кавычки, на карточках ATI.SU не находил ничего и
+    проверял пустоту; хуже того, он цеплялся за кавычки из пояснения.
+    """
+    m = ИМЯ_В_КАВЫЧКАХ.search(ln)
+    if m:
+        return m.group(1).strip(" *_`") or None
+    m = БЕЗ_КАВЫЧЕК.search(ln)
     if not m:
-        return ["SKILL.md: ссылка на спецификацию не разобрана"]
-    spec = parse_spec(spec_path)
-    problems = []
-    if m.group(1) != spec.slug:
-        problems.append(f"SKILL.md: спецификация id «{m.group(1)}» ≠ «{spec.slug}»")
-    if m.group(3) != spec.fp:
-        problems.append(f"SKILL.md: отпечаток спецификации {m.group(3)} ≠ текущему {spec.fp} — "
-                        "спецификация менялась после сборки; пересобери пакет")
-    return problems
+        return None
+    зн = m.group(1).strip(" *_`").rstrip(".,;:—- ")
+    # «Активируй навыки в порядке ниже:» — это не имя, а зачин списка.
+    if len(зн) < 4 or nameflat(зн).startswith(("в порядк", "последовательн",
+                                               "по порядк", "простран")):
+        return None
+    return зн
 
 
-def audit_package(package: Path, spec_path: Path | None = None) -> dict:
-    if not package.is_dir():
-        print(f"ОШИБКА ВХОДА: папка пакета не найдена: {package}", file=sys.stderr)
-        sys.exit(EXIT_INPUT)
-    tree = check_tree(package)
-    skill_p = package / "skills" / "00-agent-skill" / "SKILL.md"
-    cmd_p = package / "commands" / "run-agent.md"
-    skill_text = skill_p.read_text(encoding="utf-8") if skill_p.is_file() else ""
-    cmd_text = cmd_p.read_text(encoding="utf-8") if cmd_p.is_file() else ""
-    res = audit_texts(skill_text, cmd_text, package.name)
-    res["findings"] = tree + res["findings"] + spec_link_problems(skill_text, spec_path)
-    res["status"] = "FAIL" if res["findings"] else "PASS"
-    res["package"] = str(package)
-    return res
+def объявленный_счёт(блок: str) -> list[tuple[int, str]]:
+    """Числительные, которыми блок сам называет число шагов активации.
+
+    Два места: анонс («активируй последовательно три навыка») и замыкающая
+    фраза («только после этих трёх шагов»). Оба пишутся словом, оба
+    правятся врозь — и разошлись: в карточке агента 2 стояло «этих двух
+    шагов» при трёх пунктах списка. Агент, читающий «после двух», имеет
+    полное право остановиться на втором.
+    """
+    т = nameflat(блок)
+    найдено = []
+    for m in re.finditer(rf"актив\w*\s+(?:\w+\s+){{0,2}}?({_ЧИСЛА})\s+навык", т):
+        найдено.append((ЧИСЛИТЕЛЬНЫЕ[m.group(1)], m.group(0).strip()))
+    for m in re.finditer(rf"эти\w*\s+({_ЧИСЛА})\s+шаг", т):
+        найдено.append((ЧИСЛИТЕЛЬНЫЕ[m.group(1)], m.group(0).strip()))
+    return найдено
 
 
-def render(res: dict) -> str:
-    out = [f"АУДИТ ПАКЕТА · {res['package']}", f"audit_status: {res['status']}"]
-    if res["findings"]:
-        out.append("critical_findings:")
-        out += [f"  - {f}" for f in res["findings"]]
-    if res["notes"]:
-        out.append("notes:")
-        out += [f"  - {n}" for n in res["notes"]]
-    return "\n".join(out)
+ОТКАЗ_УСЛОВИЕ = re.compile(r"\bнет\b|отсутств|не установлен|недоступ|не найден")
+ОТКАЗ_ДЕЙСТВИЕ = re.compile(r"скажи|сообщи|предупред|первой строкой|"
+                            r"не восстанавливай|помечай|пометь")
+# «Любого из двух», «какого-то из навыков», «это касается обоих» — правило,
+# написанное на всю группу сразу. Оно покрывает каждый навык не хуже, чем
+# перечисление по именам, и требовать перечисления значит требовать переписать
+# исправный текст.
+# Дефис здесь не пишется намеренно: `nameflat` схлопывает дефисы в пробел, и
+# «какого-то» приходит как «какого то». Шаблон с дефисом не совпал бы ни разу —
+# и это был бы не отказ проверки, а тихий пропуск.
+ОТКАЗ_НА_ГРУППУ = re.compile(r"любо\w+ из|како\w+ то из|каждо\w+ из|"
+                             r"ни одного из|обо\w+\b|\bоба\b|всех\w* из")
 
 
-def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Структурный аудит пакета агента GigaCowork")
-    ap.add_argument("--package", required=True, help="папка <agent-slug>")
-    ap.add_argument("--spec", help="AGENT_SPEC.md — сверить отпечаток")
-    ap.add_argument("--json", action="store_true")
-    args = ap.parse_args(argv)
-    res = audit_package(Path(args.package), Path(args.spec) if args.spec else None)
-    print(json.dumps(res, ensure_ascii=False, indent=2) if args.json else render(res))
-    return EXIT_OK if res["status"] == "PASS" else EXIT_RED
+def правило_отказа(блок: str, имена: list[str]) -> tuple[bool, list[str]]:
+    """(есть ли правило отказа, какие навыки оно не покрывает).
+
+    Правило отказа — абзац «если навыка нет, вот что делай»: условие плюс
+    действие. Одного условия мало: «навык может быть не установлен» — это
+    наблюдение, а не инструкция.
+
+    Покрытие считается по основам слов, а не дословно: имя в правиле стоит в
+    косвенном падеже — «без „Работы с данными Seldon“». Дословное сравнение
+    покраснело бы на исправном комплекте, а проверку, кричащую на
+    правильном, выключают целиком — и тогда она не ловит уже ничего.
+    """
+    абзацы = re.split(r"\n\s*\n", nfc(блок))
+    правила = [i for i, п in enumerate(абзацы)
+               if ОТКАЗ_УСЛОВИЕ.search(nameflat(п))
+               and ОТКАЗ_ДЕЙСТВИЕ.search(nameflat(п))]
+    if not правила:
+        return False, list(имена)
+    if len(имена) == 1:
+        # Зовут один навык — правило может не называть его: «навыка нет в
+        # пространстве» ни с чем не спутаешь. Требовать имя там, где выбора
+        # нет, значит заводить красное на исправном тексте.
+        return True, []
+    непокрытые = []
+    for имя in имена:
+        нужны = set(токены(имя))
+        # Окно в три абзаца: правило на два навыка пишется в два хода —
+        # «если любого из двух нет — скажи первой строкой», а следом «это
+        # касается обоих: без „А“ …; без „Б“ …».
+        if any(ОТКАЗ_НА_ГРУППУ.search(nameflat(абзацы[i]))
+               or (нужны and нужны <= set(токены(" ".join(абзацы[i:i + 3]))))
+               for i in правила):
+            continue
+        непокрытые.append(имя)
+    return True, непокрытые
+
+
+def _узлы(root: Path, files):
+    """Файл → множество имён, под которыми на него можно сослаться."""
+    из_имени = {}
+    for f in files:
+        rel = str(f.relative_to(root))
+        for имя in (f.name, rel, rel.replace("\\", "/")):
+            из_имени.setdefault(nameflat(имя), set()).add(f)
+    return из_имени
+
+
+def block_graph(root: Path, files, dirs) -> None:
+    """Слой 1: ссылки в никуда, сироты, достижимость от точки входа."""
+    тексты = [f for f in files if f.suffix.lower() == ".md"]
+    if not тексты:
+        return
+    индекс = _узлы(root, files)
+    папки = {nameflat(d.name) for d in dirs} | {
+        nameflat(str(d.relative_to(root))) for d in dirs}
+
+    # Верхний уровень комплекта: по нему отличается ссылка НА АРТЕФАКТ
+    # КОМПЛЕКТА от имени файла, который агент создаёт в рантайме.
+    #
+    # Без этого различения проверка выдала 386 «ссылок в никуда» на живом
+    # комплекте, и почти все были ложными: `02_справка.docx`,
+    # `sandbox:/output/<дата>/01_решения_и_шаги.md`, `реестр_профилей.xlsx` —
+    # это ВЫХОД агента, а не файл поставки. Проверка, дающая три сотни ложных
+    # срабатываний, не строгая, а бесполезная: её выключат целиком.
+    верх = {nameflat(d.name) for d in dirs if d.parent == root}
+
+    def путь_комплекта(цель: str) -> bool:
+        if "sandbox:" in цель.lower() or "<" in цель:
+            return False          # рантайм-выход агента и шаблон имени
+        сегм = [s for s in цель.replace("\\", "/").split("/") if s]
+        return len(сегм) > 1 and nameflat(сегм[0]) in верх
+
+    # Файлы, которые по назначению говорят о прошлом: изъятия, журналы
+    # изменений. Ссылка на удалённый файл там — не дефект, а запись.
+    ПРОШЛОЕ = ("что убрано", "что не собрано", "журнал изменен", "изъят")
+
+    # Папка тоже узел: агента называют по имени папки или slug, а не по имени
+    # файла внутри неё. Без этих рёбер достижимость меряет не то — на живом
+    # комплекте все девять агентов ATI.SU выглядели недостижимыми только
+    # потому, что инструкция называет их slug'ом, а не файлом.
+    по_папке = {}
+    for d in dirs:
+        for ключ in {nameflat(d.name), nameflat(слаг(d.name))}:
+            if len(ключ) >= 4:
+                по_папке.setdefault(ключ, set()).update(
+                    f for f in files if d in f.parents)
+
+    рёбра: dict[Path, set] = {f: set() for f in files}
+    висящие: list[str] = []
+    for f in тексты:
+        txt = nfc(read_text(f))
+        о_прошлом = any(s in nameflat(f.name) for s in ПРОШЛОЕ)
+        for m in ССЫЛКА.finditer(txt):
+            цель = m.group(1).strip()
+            k = nameflat(цель)
+            if any(s in k for s in СНАРУЖИ):
+                continue
+            подходящие = индекс.get(k) or индекс.get(nameflat(цель.split("/")[-1]))
+            if подходящие:
+                рёбра[f] |= подходящие
+            # Ссылка НА ПАПКУ — не дефект; ссылка на файл ВНУТРИ папки —
+            # дефект, если файла нет. Прежнее условие гасило и то и другое
+            # (`k.startswith(pp)`), и мутация «ссылка в никуда» не ловилась:
+            # любой путь внутри существующей папки считался ссылкой на папку.
+            elif (путь_комплекта(цель) and not о_прошлом
+                  and k not in папки and k.rstrip("/") not in папки):
+                висящие.append(f"{f.relative_to(root)} → «{цель}»")
+        плоский = nameflat(txt)
+        for ключ, цели in по_папке.items():
+            if ключ in плоский:
+                рёбра[f] |= цели
+
+    chk("СВ", "нет ссылок в никуда", not висящие,
+        "; ".join(висящие[:5]) + (f" (всего {len(висящие)})"
+                                  if len(висящие) > 5 else "")
+        + " — ссылка на файл, которого в комплекте нет: агент прочитает её и "
+          "не сообщит об этом, а администратор пойдёт искать несуществующее",
+        код="СВ-ССЫЛКА-В-НИКУДА")
+
+    # Достижимость от точки входа. Вопрос не «связан ли граф вообще», а
+    # практический: дойдёт ли человек, читающий комплект с начала, до каждого
+    # агента. Компоненты связности сами по себе этого не отвечают.
+    входы = [f for f in тексты
+             if any(s in nameflat(f.name)
+                    for s in ("как использовать", "инструкция по сбор",
+                              "читай", "точка входа", "каталог"))]
+    if входы:
+        достижимы, фронт = set(входы), list(входы)
+        while фронт:
+            u = фронт.pop()
+            for v in рёбра.get(u, ()):
+                if v not in достижимы:
+                    достижимы.add(v)
+                    фронт.append(v)
+        пакеты = [d for d in dirs if "пакеты агентов" in nameflat(d.name)]
+        агенты = [d for d in dirs if пакеты and d.parent == пакеты[0]
+                  and not is_archive(d.relative_to(root))]
+        глухие = [d.name for d in агенты
+                  if not any(f in достижимы for f in files if d in f.parents)]
+        chk("СВ", "каждый агент достижим от точки входа", not глухие,
+            ", ".join(глухие[:4]) + " — читая комплект с начала, до этих "
+            "агентов не дойти: их не называет ни инструкция по сборке, ни "
+            "точка входа, ни каталог",
+            код="СВ-НЕДОСТИЖИМ")
+
+        # Сиротами считаются ДОКУМЕНТЫ ПОСТАВКИ, а не содержимое базы знаний,
+        # синтетики и приёмочных наборов: там файлы по природе не связаны
+        # ссылками, их читает агент по своей логике. Считать их сиротами —
+        # значит утопить сигнал в шуме.
+        ВНУТРЕННЕЕ = ("база знаний", "синтетик", "synthetic", "demo", "демо",
+                      "проверка", "evals", "калибров", "seldon data",
+                      "00 agent skill", "commands")
+        сироты = [str(f.relative_to(root)) for f in тексты
+                  if f not in достижимы
+                  and not any(s in nameflat(str(f.relative_to(root)))
+                              for s in ВНУТРЕННЕЕ)
+                  and not any(s in nameflat(f.name) for s in ("что здесь",
+                                                              "что убрано",
+                                                              "что не собрано",
+                                                              "журнал"))]
+        chk("СВ", f"файлов вне ссылочного дерева: {len(сироты)}",
+            len(сироты) <= max(2, len(тексты) // 10),
+            ", ".join(сироты[:5]) + " — файл, на который никто не ссылается, "
+            "читается как забытый; это сигнал, а не приговор",
+            код="СВ-СИРОТА", мягкая=True)
+
+
+def block_relations(root: Path, files, dirs) -> None:
+    """Слой 3: предикаты между РАЗНЫМИ артефактами одного агента."""
+    пакеты = [d for d in dirs if "пакеты агентов" in nameflat(d.name)]
+    if not пакеты:
+        return
+    корень = пакеты[0]
+    агенты = [d for d in dirs if d.parent == корень
+              and not is_archive(d.relative_to(root))]
+    if not агенты:
+        return
+
+    расхождения, префиксы, вникуда, безджобы = [], [], [], []
+    имена_латиницей, заголовки, без_имени = [], [], []
+    без_id, id_расходятся, дубли_id = [], [], []
+    не_резолвятся, счёт_расходится, без_отказа = [], [], []
+    счёт_команд, всего_команд, без_своего, без_перечня = [], 0, [], []
+    занято: dict[str, str] = {}
+
+    # Что вообще объявлено в поставке под именем — резолвер графа вызовов.
+    # Слаг из `name:` сюда не попадает намеренно: это имя каталога шаблона, а
+    # не имя, которое человек введёт в форму. Карточка, зовущая русское имя
+    # при слаге в навыке, обязана краснеть — иначе агент не найдёт свой
+    # собственный навык, и выглядеть это будет как «агент не слушается».
+    объявленные: dict[str, Path] = {}
+    слагами: dict[str, str] = {}
+    навыки_пространства = {
+        f for f in files if is_skill(f)
+        and "навык" in nameflat(str(f.relative_to(root)))
+        and "пространств" in nameflat(str(f.relative_to(root)))}
+    for f in files:
+        if not is_skill(f):
+            continue
+        нм, поле = имя_навыка(read_text(f))
+        if not нм:
+            continue
+        if поле == "name" and имя_слагом(нм):
+            слагами[str(f.relative_to(root))] = нм
+            continue
+        объявленные.setdefault(nameflat(нм), f)
+    базы = [d for d in dirs if "база знаний" in nameflat(str(d.relative_to(root)))]
+    карты = [f for f in files if "карта джоб" in nameflat(f.name)]
+    # Для сравнения названий разметка не значима: в карте джоб имя выделено
+    # жирным, в карточке — нет. Сравнение по «сырому» nameflat промахивалось
+    # именно на звёздочках, и четыре агента ложно объявлялись пропущенными.
+    безразметки = lambda s: re.sub(r"\s+", " ",
+                                   re.sub(r"[*_`«»\"']+", " ", nameflat(s))).strip()
+    карта_txt = безразметки(" ".join(read_text(f) for f in карты))
+
+    for a in агенты:
+        свои = [f for f in files if a in f.parents]
+        навык = next((f for f in свои if is_skill(f)), None)
+        карточка = next((f for f in свои if "карточк" in nameflat(f.name)), None)
+        команды = next((f for f in свои if "команд" in nameflat(f.name)), None)
+        if not навык:
+            continue
+        txt = nfc(read_text(навык))
+        имя_зн, поле_имени = имя_навыка(txt)
+        слаг_вместо_имени = bool(имя_зн) and поле_имени == "name" and имя_слагом(имя_зн)
+        if слаг_вместо_имени:
+            # Объявлен слаг пакета. Имени навыка у файла нет — и делать вид,
+            # что есть, нельзя: проверки ниже сравнивали бы с ним заголовок и
+            # блок активации и выдавали три красных на один дефект.
+            имя_зн = None
+
+        # 0. Идентификатор агента: единственное, что не меняется.
+        #
+        # Всё остальное связывание в этой функции идёт по slug из имени папки
+        # и потому ломается при переименовании — за неделю это случилось
+        # четырежды, и каждый раз проверки оставались зелёными на файлах,
+        # которые не проверялись. `id` разрывает зависимость от имён.
+        m_id = re.search(r"^\s*id:\s*([a-z0-9][a-z0-9-]{2,60})\s*$",
+                         txt, re.M)
+        if not m_id:
+            без_id.append(a.name)
+        else:
+            ид = m_id.group(1)
+            if ид in занято:
+                дубли_id.append(f"«{ид}»: {занято[ид]} и {a.name}")
+            занято[ид] = a.name
+            if карточка:
+                m_ck = re.search(r"^\s*\*\*id:\*\*\s*([a-z0-9][a-z0-9-]{2,60})",
+                                 nfc(read_text(карточка)), re.M)
+                if not m_ck:
+                    id_расходятся.append(f"{a.name}: в карточке нет строки "
+                                         f"«**id:** {ид}»")
+                elif m_ck.group(1) != ид:
+                    id_расходятся.append(
+                        f"{a.name}: навык «{ид}» против карточки "
+                        f"«{m_ck.group(1)}»")
+
+        # 0.5. Имя навыка — русское, и заголовок совпадает с ним дословно.
+        #
+        # Активация работает по дословному совпадению. Человек вставляет в
+        # поле «Имя навыка» русское имя, а карточка, собранная по слагу,
+        # требует активировать `1_target-company-check` — агент такого навыка
+        # не находит и молча работает без него. На прогонах это выглядело как
+        # «агент не слушается инструкции».
+        #
+        # Правило жило в сборщике пакета (`build_agent_package.py`), но не на
+        # уровне комплекта: пакет, собранный руками, проходил мимо. Тот же
+        # класс, что и с нумерацией папок, — у проверки не было своего уровня.
+        if not имя_зн:
+            # Поле формы отсутствует вовсе либо заполнено слагом. Мягко:
+            # комплекты, собранные до перехода на форму «Создать навык»,
+            # заполнялись в конструкторе руками, и там имя вводил человек. Но
+            # для Поколения 2, где поля берутся из фронтматтера, последствие
+            # жёсткое — и его называет проверка графа вызовов ниже.
+            без_имени.append(
+                f"{a.name} (объявлен слаг «{слагами.get(str(навык.relative_to(root)), '')}» "
+                "в поле `name:`)" if слаг_вместо_имени else a.name)
+        else:
+            зн = имя_зн
+            if not re.search(r"[А-Яа-яЁё]", зн):
+                имена_латиницей.append(f"{a.name}: «{зн}»")
+            elif re.match(r"^\d+[_\-\s]", зн):
+                имена_латиницей.append(f"{a.name}: «{зн}» — начинается с номера")
+            h1 = re.search(r"^#\s+(.+?)\s*$", txt, re.M)
+            if h1:
+                загл = h1.group(1).strip().strip("«»\"")
+                обёртка = re.match(r"^Единый навык агента\s*", загл)
+                if обёртка:
+                    заголовки.append(
+                        f"{a.name}: заголовок «{h1.group(1).strip()}» — обёртка "
+                        "«Единый навык агента» попадает в текст активации")
+                elif nameflat(загл) != nameflat(зн):
+                    заголовки.append(
+                        f"{a.name}: заголовок «{загл}» ≠ имя навыка «{зн}»")
+
+        # 1. Имя навыка в БЛОКЕ АКТИВАЦИИ карточки == фронтматтер навыка.
+        #
+        # Искать по всему файлу нельзя: имя агента встречается в карточке в
+        # описании и в заголовке, и проверка проходила на карточке, где блок
+        # активации называл уже другое имя. Активация работает по дословному
+        # совпадению — там и сравниваем.
+        if имя_зн and карточка:
+            # Блока активации нет вовсе — это отдельный дефект, его называет
+            # «Я4: блок активации навыка на месте». Две проверки на один
+            # дефект дают два разных объяснения одного и того же.
+            блок_а = блок_активации(read_text(карточка))
+            if блок_а and nameflat(имя_зн) not in nameflat(блок_а):
+                расхождения.append(
+                    f"{a.name}: блок активации карточки не называет навык "
+                    f"«{имя_зн}»")
+
+        # 2. Префикс команд == номер агента в имени папки.
+        ном = re.match(r"(\d+)", a.name)
+        if команды and ном:
+            # Заголовок команды пишут по-разному: «## 1.0 Название» и
+            # «### /3.0 как-со-мной-работать». Регэксп под одну форму давал
+            # молчаливый пропуск: на комплекте другой формы проверка не
+            # находила ни одного префикса и проходила впустую.
+            найдены = set(re.findall(r"^#{2,4}\s*/?(\d+)\.\d",
+                                     nfc(read_text(команды)), re.M))
+            if not найдены:
+                префиксы.append(f"{a.name}: в файле команд нет ни одного "
+                                "заголовка с префиксом вида «N.M»")
+            чужие = найдены - {ном.group(1)}
+            if чужие:
+                префиксы.append(f"{a.name}: префиксы {sorted(чужие)} "
+                                f"вместо {ном.group(1)}")
+
+        # 3. Ссылки навыка на базу знаний ведут в существующие файлы.
+        свои_базы = [b for b in базы if nameflat(a.name.split("_", 1)[-1])
+                     in nameflat(str(b.relative_to(root)))]
+        if свои_базы:
+            есть = {nameflat(f.name) for b in свои_базы
+                    for f in files if b in f.parents}
+            for m in ССЫЛКА.finditer(txt):
+                цель = nameflat(m.group(1).split("/")[-1])
+                if any(s in цель for s in СНАРУЖИ):
+                    continue
+                if цель not in есть and not any(
+                        цель == nameflat(f.name) for f in files):
+                    вникуда.append(f"{a.name} → «{m.group(1)}»")
+
+        # 3.1. Перечень навыков карточки называет СВОЙ навык агента.
+        #
+        # Повод: у всех восьми агентов ПТМ раздел «Рекомендуемые навыки»
+        # перечислял встроенные навыки платформы и навык пространства — и ни
+        # разу не называл навык самого агента. А его человек создаёт руками
+        # из файла пакета: отметил галочками перечисленное, пошёл дальше, и
+        # агент остался с одной карточкой. Форма ответа, модули, пороги и
+        # шлюзы живут в навыке; без него агент отвечает свободным текстом и
+        # выглядит «неумным», хотя собран правильно.
+        #
+        # Блок активации этого не заменяет: он говорит, что активировать в
+        # начале работы, а перечень — что создать и прикрепить при сборке.
+        # Это два разных действия и два разных момента.
+        if карточка and имя_зн:
+            c = nfc(read_text(карточка))
+            i_п = c.find("## Рекомендуемые навыки")
+            if i_п >= 0:
+                j_п = c.find("\n## ", i_п + 5)
+                перечень = c[i_п:j_п if j_п > 0 else len(c)]
+                if nameflat(имя_зн) not in nameflat(перечень):
+                    без_своего.append(f"{a.name}: «{имя_зн}»")
+            else:
+                # Раздела нет вовсе — проверять нечего, и это ровно тот
+                # случай, когда проверка проходит, ничего не измерив.
+                # Тогда спрашиваем мягче: сказано ли в карточке где-нибудь,
+                # что свой навык надо СОЗДАТЬ. Блок активации не считается:
+                # он про начало работы агента, а не про сборку.
+                блок_а = nameflat(блок_активации(c))
+                вне = nameflat(c).replace(блок_а, " ") if блок_а else nameflat(c)
+                сказано = any(
+                    re.search(гл + r"[^.\n]{0,80}" + re.escape(nameflat(имя_зн)), вне)
+                    or re.search(re.escape(nameflat(имя_зн)) + r"[^.\n]{0,80}" + гл, вне)
+                    for гл in ("созда", "прикреп", "загруз", "постав"))
+                if not сказано:
+                    без_перечня.append(f"{a.name}: «{имя_зн}»")
+
+        # 3.2. Сколько команд объявлено в шапке файла — столько и заголовков.
+        #
+        # Повод: у ПТМ файл команд агента 8 говорил «8 команд», а заголовков
+        # было девять; у агента 6 — «4 команды» при пяти. Человек, создающий
+        # команды в конструкторе по этому файлу, сверяется с числом в шапке:
+        # создал восемь, девятую не заметил. Проверяется только шапка —
+        # первые десять строк: дальше по тексту «команды 4.2–4.6 не трогать»
+        # и подобное, и это не объявление состава.
+        if команды:
+            t_cmd = nfc(read_text(команды))
+            всего_команд += len(re.findall(r"^#{2,4}\s*/?\d+\.\d+\s", t_cmd, re.M))
+            шапка = "\n".join(t_cmd.splitlines()[:10])
+            факт = len(re.findall(r"^#{2,4}\s*/?\d+\.\d+\s", t_cmd, re.M))
+            # `flat`, а не `nameflat`: последний схлопывает подчёркивания в
+            # пробел, и имя файла `02_Команды_<slug>.md` читается как
+            # «02 команд» — объявлением состава, которым оно не является.
+            m_k = re.search(r"(\d+)\s+команд", flat(шапка))
+            if m_k and факт and int(m_k.group(1)) != факт:
+                счёт_команд.append(
+                    f"{a.name}: в шапке «{m_k.group(0)}», заголовков {факт}")
+
+        # 3.5. ГРАФ ВЫЗОВОВ: ребро «карточка зовёт навык по имени».
+        #
+        # Разбирается и карточка, и сам навык: активацию объявляют оба, и
+        # правятся они врозь. Оба дефекта 13.09 сидели в паре «карточка +
+        # навык», причём в карточке — один, а в навыке — другой.
+        for вид, арт in (("карточка", карточка), ("навык", навык)):
+            if not арт:
+                continue
+            текст_арт = read_text(арт)
+            блок = блок_активации(текст_арт)
+            if not блок:
+                continue
+            зовут, пунктов = вызовы_активации(блок)
+
+            # (а) имя резолвится в навык поставки — дословно.
+            for нм in зовут:
+                if nameflat(нм) in объявленные:
+                    continue
+                почему = ""
+                if слаг_вместо_имени:
+                    слаг_нм = слагами.get(str(навык.relative_to(root)), "")
+                    почему = (f"; свой навык объявляет себя слагом «{слаг_нм}» "
+                              "в поле `name:` — в форму «Имя навыка» попадёт он")
+                не_резолвятся.append(f"{a.name}/{вид} → «{нм}»{почему}")
+
+            # (б) объявленный счёт шагов сходится с числом пунктов.
+            if пунктов:
+                названо = объявленный_счёт(блок)
+                расклад = {пунктов} | {n for n, _ in названо}
+                if названо and len(расклад) > 1:
+                    счёт_расходится.append(
+                        f"{a.name}/{вид}: пунктов {пунктов}, а сказано "
+                        + ", ".join(f"«{ф}»" for _, ф in названо[:2]))
+
+            # (в) у каждого зовомого навыка ПРОСТРАНСТВА есть правило отказа.
+            #
+            # Свой навык агента сюда не попадает: он приезжает вместе с
+            # агентом, и «а если его нет» — вопрос не к агенту. Навык
+            # пространства ставится отдельным действием администратора, и
+            # именно он может не встать.
+            чужие = [нм for нм in зовут
+                     if объявленные.get(nameflat(нм)) in навыки_пространства]
+            if чужие:
+                есть, непокрытые = правило_отказа(блок, чужие)
+                if not есть:
+                    без_отказа.append(
+                        f"{a.name}/{вид}: правила отказа нет вовсе "
+                        f"(зовёт: {', '.join(f'«{н}»' for н in чужие)})")
+                elif непокрытые:
+                    без_отказа.append(
+                        f"{a.name}/{вид}: правило не покрывает "
+                        + ", ".join(f"«{н}»" for н in непокрытые))
+
+        # 4. Карта джоб знает про этого агента.
+        #
+        # Карта бывает и таблицей с номерами (ATI.SU), и прозой (ПТМ), а
+        # название в ней короче, чем в карточке: «Разместить грузы» против
+        # «Разместить грузы — публикация на бирже из файла». Поэтому ключей
+        # три — короткое название из карточки, slug и номер строки, — и
+        # достаточно любого: проверяется присутствие агента в карте, а не
+        # соблюдение формата карты.
+        if карты:
+            ключи = {безразметки(слаг(a.name))}
+            if карточка:
+                m3 = re.search(r"^##\s*Название\s*$\n+(.+?)\s*$",
+                               nfc(read_text(карточка)), re.M)
+                if m3:
+                    ключи.add(безразметки(re.split(r"[—–]", m3.group(1))[0]))
+            ключи = {k for k in ключи if len(k) >= 4}
+            if ключи and not any(k in карта_txt for k in ключи):
+                безджобы.append(f"{a.name} (искали: "
+                                + ", ".join(sorted(ключи)[:2]) + ")")
+
+    chk("О", "у каждого агента объявлен id", not без_id,
+        ", ".join(без_id[:4]) + " — без `id` связывание артефактов идёт по "
+        "совпадению имён и ломается при первом же переименовании; сверка "
+        "продолжает работать по slug, но это фолбэк, а не норма",
+        код="О-ID", мягкая=True)
+    chk("О", "id карточки совпадает с id навыка", not id_расходятся,
+        "; ".join(id_расходятся[:3]) + " — идентификатор объявлен в двух "
+        "местах и разошёлся; связывать по нему больше нельзя",
+        код="О-ID-РАСХОЖДЕНИЕ")
+    chk("О", "id уникален в комплекте", not дубли_id,
+        "; ".join(дубли_id[:3]) + " — два агента с одним id неразличимы для "
+        "любой проверки, которая на него опирается",
+        код="О-ID-ДУБЛЬ")
+    chk("О", "у навыка есть поле «имя навыка»", not без_имени,
+        ", ".join(без_имени[:4]) + " — на Поколении 2 поля формы «Создать "
+        "навык» берутся из фронтматтера; без этого поля имя придётся вводить "
+        "руками, и оно разойдётся с тем, что требует карточка",
+        код="О-ИМЯ-НЕТ", мягкая=True)
+    chk("О", "имя навыка — русское, а не слаг", not имена_латиницей,
+        "; ".join(имена_латиницей[:3]) + " — человек вставляет в поле «Имя "
+        "навыка» русское имя, а карточка требует активировать латинский слаг: "
+        "агент такого навыка не находит и молча работает без него",
+        код="О-ИМЯ-ЛАТИНИЦЕЙ")
+    chk("О", "заголовок навыка совпадает с именем навыка дословно", not заголовки,
+        "; ".join(заголовки[:3]) + " — активация идёт по дословному "
+        "совпадению; обёртка «Единый навык агента» и расхождение заголовка "
+        "ломают её одинаково",
+        код="О-ЗАГОЛОВОК-НАВЫКА")
+    chk("О", "имя навыка в карточке совпадает с навыком", not расхождения,
+        "; ".join(расхождения[:3]) + " — активируется то, что названо; "
+        "карточка и навык расходятся молча",
+        код="О-ИМЯ-НАВЫКА")
+    chk("О", "имя из блока активации резолвится в навык поставки",
+        not не_резолвятся,
+        "; ".join(не_резолвятся[:3]) + " — активация работает по дословному "
+        "совпадению имени: агент позовёт навык, которого в пространстве нет "
+        "под этим именем, не найдёт и продолжит работать без него молча",
+        код="О-АКТИВАЦИЯ-НЕ-РЕЗОЛВИТСЯ")
+    chk("О", "счёт шагов активации сходится", not счёт_расходится,
+        "; ".join(счёт_расходится[:3]) + " — числительное и список правятся "
+        "врозь: добавили третий навык, а замыкающая фраза осталась «после "
+        "этих двух шагов», и агент вправе остановиться на втором",
+        код="О-СЧЁТ-ШАГОВ")
+    chk("О", "у каждого зовомого навыка пространства есть правило отказа",
+        not без_отказа,
+        "; ".join(без_отказа[:3]) + " — навык пространства ставит "
+        "администратор отдельным действием, и он может не встать; без правила "
+        "агент восстановит его содержание по памяти и не скажет об этом",
+        код="О-НЕТ-ПРАВИЛА-ОТКАЗА")
+    # Число команд: в шапке файла агента и в документах, говорящих о портфеле.
+    #
+    # Второе — та же болезнь, что «все семь агентов»: «39 слэш-команд» в
+    # каталоге и «всего 35 команд» в руководстве пользователя пережили три
+    # версии портфеля. Человек читает число и думает, что знает объём.
+    портфель = []
+    for f in files:
+        путь = nameflat(str(f.relative_to(root)))
+        if f.suffix.lower() != ".md":
+            continue
+        свой = f.parent == root or "руководство пользовател" in nameflat(f.name)
+        if not свой:
+            continue
+        if re.search(r"\d{2}[._-]\d{2}[._-]\d{2}", путь) or any(
+                x in путь for x in ("журнал", "беклог", "находк", "протокол",
+                                    "контур", "отчет", "манифест")):
+            continue
+        # Считается только заявление о ПОРТФЕЛЕ целиком. «У агента 3 стало
+        # 6 команд вместо 5» и «в каждом агенте было по 2 команды» — верные
+        # фразы про одного агента и про прошлое; проверка, считающая их
+        # объявлением состава, краснеет на исправном тексте.
+        текст = flat(read_text(f))
+        for m in re.finditer(r"(\d+)\s+(слэш-)?команд\w*(\s+с\s+префикс\w+)?",
+                             текст):
+            перед = текст[max(0, m.start() - 30):m.start()]
+            о_портфеле = (bool(m.group(2) or m.group(3))
+                          or re.search(r"всего|итого|в сумме|состав\w*", перед))
+            # «по 2 команды в каждом агенте» — распределительное «по»: речь о
+            # каждом, а не обо всех сразу.
+            if re.search(r"\bпо\s*$", перед):
+                continue
+            if о_портфеле and всего_команд and int(m.group(1)) != всего_команд:
+                портфель.append(f"{f.name}: «{m.group(0).strip()}»")
+    chk("О", "перечень навыков карточки называет свой навык агента",
+        not без_своего,
+        "; ".join(без_своего[:3]) + " — перечень говорит, что создать и "
+        "прикрепить при сборке; свой навык человек создаёт руками из файла "
+        "пакета, и не названный там он не будет создан",
+        код="О-СВОЙ-НАВЫК-В-ПЕРЕЧНЕ")
+    chk("О", "в карточке сказано, что свой навык надо создать", not без_перечня,
+        "; ".join(без_перечня[:3]) + " — раздела «Рекомендуемые навыки» в "
+        "карточке нет, и нигде больше не сказано, что навык агента создаётся "
+        "руками из файла пакета: человек соберёт карточку и остановится",
+        код="О-СВОЙ-НАВЫК-СОЗДАТЬ", мягкая=True)
+    chk("О", "число команд в шапке файла совпадает с числом заголовков",
+        not счёт_команд,
+        "; ".join(счёт_команд[:3]) + " — человек создаёт команды по этому "
+        "числу: создал восемь, девятую не заметил",
+        код="О-СЧЁТ-КОМАНД")
+    if всего_команд:
+        chk("Н", f"число команд портфеля совпадает со счётом ({всего_команд})",
+            not портфель,
+            "; ".join(портфель[:4]) + " — портфель вырос, число в документе "
+            "осталось; по нему сверяют объём переноса",
+            код="Н-СЧЁТ-КОМАНД-ПОРТФЕЛЯ")
+    chk("О", "префиксы команд соответствуют номеру агента", not префиксы,
+        "; ".join(префиксы[:3]) + " — в общем пуле команд пространства чужой "
+        "префикс уводит пользователя к другому агенту",
+        код="О-ПРЕФИКС")
+    chk("О", "ссылки навыка на базу знаний резолвятся", not вникуда,
+        "; ".join(вникуда[:4]) + " — агент прочитает ссылку в никуда и "
+        "достроит содержание по названию файла",
+        код="О-БАЗА-ЗНАНИЙ")
+    if карты:
+        chk("О", "карта джоб знает про каждого агента", not безджобы,
+            ", ".join(безджобы[:4]) + " — агент без строки в карте джоб не "
+            "объясняется словами роли, и на встрече его называют «ещё один»",
+            код="О-КАРТА-ДЖОБ", мягкая=True)
+
+
+# ─────────────────────────── ядро ───────────────────────────
+
+def core(root: Path, files, dirs, gen: str, calc: bool, task: str) -> None:
+    # Я1 — пакет агента открытыми файлами.
+    #
+    # Архивов в поставке нет ни на одном поколении. Архив нельзя прочитать
+    # глазами, сравнить двумя версиями, найти поиском по папке и поправить,
+    # не пересобрав; сверка комплекта из него тоже ничего не видит.
+    # Конструктор Поколения 2 принимает загрузку архивом — упаковывает его
+    # человек по инструкции Я6, как и прочие свои шаги в интерфейсе.
+    # Архив опознаётся по СОДЕРЖИМОМУ, а не по расширению: в поставке ПТМ
+    # лежал файл `ziFdAxqR` без расширения — zip с августовской копией
+    # навыка пространства. Проверка по имени его не видела, а администратор,
+    # распаковавший его «посмотреть, что это», поставил бы старую редакцию.
+    def это_архив(f: Path) -> bool:
+        if f.suffix.lower() == ".zip":
+            return True
+        if f.suffix:                       # у документов расширение есть
+            return False
+        try:
+            with f.open("rb") as fh:
+                return fh.read(4) == b"PK\x03\x04"
+        except Exception:
+            return False
+
+    zips = [f for f in files if это_архив(f)]
+    chk("Я1", "в поставке нет архивов", not zips,
+        "архивы: " + ", ".join(str(z.relative_to(root)) for z in zips[:4])
+        + " — распакуйте: из архива не видно ни содержимого, ни расхождений, "
+          "и проверка комплекта его не читает")
+    # Учётные данные в поставке — не «черновик, который потом уберут».
+    #
+    # Повод: в папке коннектора ПТМ лежал `login and password _ for test_
+    # QA.docx` — файл от поставщика с логинами и паролями тестовых учётных
+    # записей. Комплект уходит клиенту и в ИТ целиком; пароли живут в `.env`
+    # на сервере и нигде больше. Проверка смотрит на ИМЯ, потому что имя
+    # видно без открытия: файл с таким именем не должен доехать независимо
+    # от того, что внутри.
+    креды = [f for f in files
+             if re.search(r"login|password|пароль|credential|secret|token",
+                          nameflat(f.name))
+             or nameflat(f.name) in (".env", "env")]
+    chk("Я1", "в поставке нет файлов с учётными данными", not креды,
+        ", ".join(str(f.relative_to(root)) for f in креды[:3])
+        + " — комплект уходит клиенту и в ИТ целиком; учётные данные живут "
+          "в `.env` на сервере и нигде больше",
+        код="Я1-УЧЁТНЫЕ-ДАННЫЕ")
+
+    skills_open = [f for f in files if is_skill(f)]
+    chk("Я1", "текст навыка лежит открытым файлом", bool(skills_open),
+        "ни одного `00_Навык_<slug>.md` — это и есть агент, и он должен "
+        "читаться без распаковки")
+    if gen != "2":
+        kit = find_dirs(dirs, "build-kit", "build kit",
+                        "пакет агента", "пакеты агентов")
+        chk("Я1", "пакет агента: build-kit Поколения 1.5", bool(kit),
+            "не найден build-kit — ни одной папки пакета")
+
+    # Я2 — база знаний ПРОСТРАНСТВА.
+    #
+    # Синтетика для показа тоже содержит папку `01_rag_knowledge_base` —
+    # это демонстрационные данные агента, а не база знаний пространства.
+    # Пока синтетика лежала архивом, разница была не видна; после отказа от
+    # архивов проверка немедленно потребовала карту состава внутри демо-данных.
+    # Второй случай за один прогон, когда распаковка вскрыла эвристику по пути.
+    kbs = [d for d in find_dirs(dirs, "база знаний", "база_знаний", "knowledge")
+           if not any(x in nameflat(part)
+                      for part in d.relative_to(root).parts
+                      for x in ("синтетик", "synthetic", "demo", "демо"))]
+    chk("Я2", "база знаний пространства присутствует", bool(kbs),
+        "папки с базой знаний нет; без неё агент рассуждает «вообще»")
+
+    # Я3 — карта состава базы знаний, на каждую папку агента
+    if kbs:
+        missing = [str(u.relative_to(root)) for kb in kbs for u in kb_units(kb)
+                   if not any_name(list(u.iterdir()), "что здесь", "состав базы")]
+        chk("Я3", "в базе знаний есть карта состава (что грузим и чего не грузим)",
+            not missing,
+            "нет файла 00_ЧТО_ЗДЕСЬ_И_ЧЕГО_ЗДЕСЬ_НЕТ.md: "
+            + ", ".join(missing[:4])
+            + ("…" if len(missing) > 4 else "")
+            + " — состав базы знаний неявен, а два описания одного и того же "
+              "в нём дают разброс ответов")
+
+        # Я3, вторая половина: карта называет ВСЁ, что в папке лежит.
+        #
+        # Первая половина проверяет обещанное («файл, названный картой,
+        # существует»), и этого мало: карта отстаёт от папки молча. У ПТМ
+        # так вышло дважды — `критерии_отбора_ПТМ.md` с порогами, названными
+        # владельцем процесса, лежал в папках агентов 2 и 3 и не был назван
+        # ни в одной карте; а у агента 8 карта не знала ни про
+        # `tender_stoplist.md`, ни про папку приёмочных прогонов.
+        #
+        # Карта, отставшая от папки, работает ровно как её отсутствие:
+        # человек грузит папку целиком и не догадывается, что часть файлов
+        # никем не объяснена, а агент читает их наравне с объяснёнными.
+        неназванные = []
+        for kb in kbs:
+            for u in kb_units(kb):
+                карты = [f for f in u.iterdir()
+                         if f.is_file() and any_name([f], "что здесь", "состав базы")]
+                if not карты:
+                    continue                      # это первая половина Я3
+                txt = nameflat(read_text(карты[0]))
+                группы = [p for p in re.findall(r"`([^`\n]*\*[^`\n]*)`", txt)]
+                for p in sorted(u.iterdir()):
+                    if p.name.startswith(".") or p == карты[0]:
+                        continue
+                    if nameflat(p.name) in txt:
+                        continue
+                    # Групповое обещание — тоже обещание: «`ТТ/*.pdf`
+                    # (16 файлов)» называет шестнадцать файлов разом, и
+                    # требовать каждый поимённо значит требовать переписать
+                    # исправную карту.
+                    if any(fnmatch(nameflat(p.name), g) for g in группы):
+                        continue
+                    неназванные.append(
+                        f"{u.name}: {p.name}" + ("/" if p.is_dir() else ""))
+        chk("Я3", "карта состава называет всё, что лежит в папке",
+            not неназванные,
+            ", ".join(неназванные[:5])
+            + (f" (всего {len(неназванные)})" if len(неназванные) > 5 else "")
+            + " — карта, отставшая от папки, работает как её отсутствие: файл "
+              "грузится вместе со всеми и остаётся никем не объяснён",
+            код="Я3-КАРТА-ОТСТАЛА")
+    else:
+        chk("Я3", "в базе знаний есть карта состава", False, "базы знаний нет")
+
+    # Я10 — расчётное ядро, и главное: шаблон пуст
+    if calc:
+        xls = [f for f in files if f.suffix.lower() in (".xlsx", ".xlsm")]
+        in_kb = [f for f in xls if any(str(kb) in str(f) for kb in kbs)]
+        chk("Я10", "расчётный шаблон лежит в базе знаний", bool(in_kb),
+            "модель есть, но не в базе знаний — агент её не увидит" if xls
+            else "расчётной модели нет вовсе")
+        for f in in_kb:
+            chk("Я10", f"шаблон «{f.name}» поставляется пустым", template_is_blank(f),
+                "в шаблоне есть заполненные строки данных — агент получит "
+                "готовый ответ, и показ перестанет что-либо показывать")
+
+    # Я11 — семантика коннектора. Проверяется, только если агент вообще
+    # куда-то ходит: признак — упоминание коннектора в навыке или командах.
+    # Повод: агент прочитал баланс «0 из 5000» как «лимит исчерпан» и
+    # отказался работать при целом лимите. Смысл поля внешней системы
+    # выводить нельзя — он фиксируется.
+    # Признак — коннектор ОБЪЯВЛЕН ИСПОЛЬЗУЕМЫМ, а не просто упомянут.
+    # Первая версия срабатывала на слове «коннектор» и требовала файл
+    # семантики у комплекта, где в карточке прямо написано «коннекторы не
+    # требуются»: проверка ловила отрицание как утверждение.
+    NEG = (r"\bне\s|не требу|отсутству|\bнет\b|—|не использ|не подключ|"
+           r"без коннектор|недоступ")
+    uses_conn = []
+    for f in files:
+        if f.suffix.lower() != ".md":
+            continue
+        txt = nfc(read_text(f))
+        for m in re.finditer(r"[Кк]оннектор\w*", txt):
+            # Окно вокруг слова: отрицание может стоять и до, и после —
+            # «коннекторы» отдельной строкой заголовка, а «Не требуются» —
+            # абзацем ниже. Проверка по одной строке этого не видела.
+            around = txt[max(0, m.start() - 80): m.end() + 160]
+            if re.search(NEG, around, re.I):
+                continue
+            uses_conn.append(f)
+            break
+    if uses_conn:
+        # Опознаём файл по ИМЕНИ, а не по содержанию: первая версия искала
+        # ещё и по фразе «карта сервисов», и тогда карта состава базы знаний,
+        # которая на этот файл ссылается, сама сходила за него — удаление
+        # файла семантики не роняло проверку.
+        #
+        # Правила могут жить в двух местах, и оба законны:
+        #   — файлом семантики в базе знаний агента;
+        #   — навыком пространства, который подхватывает любой агент.
+        # Второе архитектурно лучше при нескольких агентах: один источник
+        # вместо копии в каждой папке. Но требование то же — правила должны
+        # быть В ПОСТАВКЕ, а не «где-то в проекте»: файл-ссылка без самого
+        # навыка оставляет агента без правил.
+        sem = [f for f in files
+               if re.search(r"коннектор|connector", nameflat(f.name))]
+        skills = [f for f in files
+                  if is_skill(f)
+                  and re.search(r"коннектор|seldon|внешн\w+ данн",
+                                nfc(read_text(f)), re.I)]
+        sem = sem + skills
+        chk("Я11", "есть файл семантики коннектора", bool(sem),
+            "агент ходит во внешнюю систему, но смысл её ответов нигде не "
+            "зафиксирован — он будет выведен моделью из названия поля")
+
+        # Одинаковый общий файл разложен по папкам агентов — проверяем текст
+        # один раз, иначе вердикт тонет в повторах.
+        # Достаточно, чтобы правила были хотя бы в одном носителе: файл
+        # в базе знаний может быть ссылкой на навык, и требовать полный
+        # текст от обоих — значит требовать дубля, который сам же скилл и
+        # запрещает.
+        seen, uniq = set(), []
+        for f in sem:
+            k = hashlib.md5(read_text(f).encode()).hexdigest()
+            if k not in seen:
+                seen.add(k); uniq.append(f)
+        best, best_miss = None, None
+        for f in uniq:
+            t = nfc(read_text(f)).lower()
+            miss = [n for n, k in [
+                ("карта сервисов", ("сервис",)),
+                ("значения полей", ("означает", "баланс", "поле")),
+                ("поведение при обрыве", ("обрыв", "повтор")),
+            ] if not any(x in t for x in k)]
+
+            # Успешный вызов без полезной нагрузки: код успеха есть, данных
+            # нет. Не покрывается тремя предыдущими — сервис доступен, поле
+            # прочитано верно, обрыва не было. Замерено: агент выдаёт пустоту
+            # за проверенный результат в 56,6 % случаев, докладывая «ничего
+            # не найдено».
+            #
+            # Ищется НЕ слово «пустой»: оно встречается в любом перечне
+            # открытых вопросов, и проверка на него проходила на файле, из
+            # которого правило вырезано. Ищется само различение — «пустой
+            # ответ» и «ничего не найдено» названы разными исходами.
+            # И ищется в ТЕЛЕ файла, а не в перечне открытых вопросов.
+            # Строка «отличается ли пустой ответ от „ничего не найдено“ —
+            # не выяснено» содержит оба слова и удовлетворяла проверку на
+            # файле, из которого правило вырезано. Вопрос — не правило;
+            # это тот же класс, что «проверка проходит на остаточном
+            # упоминании», записанный в журнале находок трижды.
+            body = re.split(r"\n#+[^\n]*(?:не описано|открытые вопросы|"
+                            r"чего здесь ещё|что уточня)", t, maxsplit=1)[0]
+            empty_rule = (re.search(r"пуст\w+ ответ", body)
+                          and re.search(r"ничего не найдено|нет результатов|"
+                                        r"проверка не выполнена", body))
+            if not empty_rule:
+                miss.append("пустой ответ отличается от «ничего не найдено»")
+
+            if best is None or len(miss) < len(best_miss):
+                best, best_miss = f, miss
+
+        if best is not None:
+            chk("Я11", f"правила коннектора описаны («{best.name}»)",
+                not best_miss,
+                "ни в одном носителе правил не описано: " + ", ".join(best_miss)
+                + " — проверены: " + ", ".join(f.name for f in uniq))
+
+        # Квота и срок доступа — часть семантики, а не эксплуатационная мелочь.
+        #
+        # Повод: доступ к внешним данным выдан на срок и с квотой в 2500
+        # запросов. Наше же правило «перебирай страницы, пока не придёт меньше
+        # ста» при такой квоте вредно: перебор арбитража по одному крупному
+        # банку — 180+ страниц, то есть 7 % квоты пилота на один вопрос.
+        #
+        # Проверяется не упоминание предела, а его ПОСЛЕДСТВИЕ. И проверяется
+        # по всем носителям сразу, а не по «лучшему»: правило про предел может
+        # быть названо в одном файле, а выбранный лучшим — вообще о пределах не
+        # говорить, и тогда «лучший» скрывает пропуск.
+        limits_named, consequence_named = [], []
+        for f in uniq:
+            t = nfc(read_text(f))
+            if re.search(r"квот\w+|лимит\w* запрос|срок действия доступ|"
+                         r"доступ действует до", t):
+                limits_named.append(f.name)
+            if re.search(r"не перебирай молча|спроси, выгружать|"
+                         r"спрос\w+ подтвержд\w+ у пользовател", t):
+                consequence_named.append(f.name)
+        if limits_named:
+            chk("Я11", "у предела доступа названо последствие, а не только число",
+                bool(consequence_named),
+                "предел назван в " + ", ".join(limits_named[:2])
+                + ", а что делать при его приближении — нигде. Число, о котором "
+                  "агент знает и ничего с ним не делает, поведения не меняет")
+
+    # Я12 — связность: каждый навык пространства назван в инструкции по сборке.
+    #
+    # Повод: навык «Работа с данными Seldon» лежал в поставке, файлы базы
+    # знаний на него ссылались, а инструкция по сборке о нём не упоминала ни
+    # словом. Администратор развернул бы пространство без него, агент прочитал
+    # бы ссылку в никуда и об этом не сообщил — снаружи всё выглядит рабочим.
+    #
+    # Общее правило: артефакт, который человек должен установить руками, но
+    # который не назван в инструкции по сборке, не будет установлен. Наличие
+    # файла в поставке этого не заменяет.
+    space_skills = [f for f in files
+                    if nameflat(f.name) == "skill.md"
+                    and "навык" in nameflat(str(f.relative_to(root)))
+                    and "пространств" in nameflat(str(f.relative_to(root)))]
+    # Навык пространства существует в поставке в одном месте.
+    #
+    # Повод: при переносе папки коннектора в комплект вместе с ней приехала
+    # копия навыка, и он оказался в двух местах сразу. Копии совпадают ровно
+    # до первой правки, а потом расходятся молча — и установлен окажется тот,
+    # который попался под руку.
+    #
+    # Копия ВНУТРИ собственной папки навыка законна: там лежит архив для
+    # загрузки, и он обязан повторять содержимое. Незаконна копия снаружи.
+    # Группируются только имена навыков ПРОСТРАНСТВА — но ищутся их копии по
+    # всей поставке, в том числе там, где слова «навык пространства» в пути
+    # нет: копия приехала внутри папки коннектора. Навык агента лежит в двух
+    # местах законно (пакет и база знаний), и его расхождение ловит отдельная
+    # проверка — по содержимому, а не по месту.
+    имена_пространства = set()
+    for f in space_skills:
+        нм, _ = имя_навыка(read_text(f))
+        if нм:
+            имена_пространства.add(nameflat(нм))
+    by_name: dict[str, list[Path]] = {}
+    for f in files:
+        if not is_skill(f):
+            continue
+        нм, _ = имя_навыка(read_text(f))
+        if нм and nameflat(нм) in имена_пространства:
+            by_name.setdefault(nameflat(нм), []).append(f)
+    scattered = []
+    for nm, fs in by_name.items():
+        if len(fs) < 2:
+            continue
+        home = min(fs, key=lambda p: len(p.parts)).parent
+        outside = [f for f in fs if home not in f.parents and f.parent != home]
+        if outside:
+            scattered.append(f"«{nm}»: {', '.join(str(f.relative_to(root)) for f in outside[:2])}")
+    chk("Я12", "навык пространства лежит в одном месте", not scattered,
+        "копия навыка вне его папки: " + "; ".join(scattered[:2])
+        + " — копии совпадают до первой правки, дальше расходятся молча")
+
+    if space_skills:
+        assembly = [f for f in files
+                    if any_name([f], "сборка", "сборке", "инструкция по сбор")]
+        atext = " ".join(nfc(read_text(f)) for f in assembly)
+        unnamed, безымянные = [], []
+        for f in space_skills:
+            nm, _ = имя_навыка(read_text(f))
+            if not nm:
+                # Раньше здесь стоял запасной вариант «имя папки», и проверка
+                # проходила случайно: папка `Разбор_тендерной_документации`
+                # почти совпадает с именем навыка. Навык, не объявивший имени,
+                # активировать нечем — это дефект, а не повод угадывать.
+                безымянные.append(str(f.relative_to(root)))
+                continue
+            if nameflat(nm) not in nameflat(atext):
+                unnamed.append(nm)
+        chk("Я12", "у навыка пространства объявлено имя", not безымянные,
+            "ни `имя навыка:`, ни `name:` — активировать нечем: "
+            + ", ".join(безымянные[:3]),
+            код="Я12-ИМЯ-НЕ-ОБЪЯВЛЕНО")
+        chk("Я12", "навыки пространства названы в инструкции по сборке",
+            not unnamed,
+            "в поставке есть, в инструкции не названы — значит не будут "
+            "установлены: " + ", ".join(unnamed[:3]))
+
+        # Я12, вторая половина: навык, называющий инструменты коннектора,
+        # работает только с коннектором, где эти инструменты есть.
+        #
+        # Повод: редакция навыка Seldon от 25.08 назвала три инструмента,
+        # появившихся в сервере 3.1. На пространстве стоял сервер прежней
+        # версии. Агент звал бы то, чего нет, и выглядело бы это как ошибка
+        # поставщика данных — ровно так на встрече и выглядело.
+        tool_named = [f for f in space_skills
+                      if re.search(r"`[a-z][a-z0-9]*_[a-z0-9_]+`", nfc(read_text(f)))]
+        if tool_named:
+            # Граница «ниже этого инструментов нет» бывает не только номером
+            # версии: у ATI.SU коннектор версионируется датой контракта
+            # рантайма. Требовать номер там, где поставщик его не даёт, значит
+            # требовать выдумать номер.
+            said = re.search(r"(верси\w+\s+[0-9]+[.,][0-9]+|"
+                             r"[0-9]+[.,][0-9]+\s+и\s+новее|"
+                             r"контракт\w*(\s+рантайма)?\s+от\s+\d{2}\.\d{2}\.\d{4})",
+                             nameflat(atext))
+            chk("Я12", "названа минимальная версия коннектора",
+                bool(said),
+                "навык пространства называет инструменты коннектора "
+                f"({', '.join(f.parent.name for f in tool_named[:2])}), а инструкция "
+                "не говорит, с какой версии они существуют: администратор оставит "
+                "прежнюю, агент позовёт несуществующий инструмент, и это будет "
+                "выглядеть как отказ внешней системы")
+
+            # И версия эта — одна на инструкцию и на сам навык.
+            #
+            # Повод: инструкция ПТМ обещала «4.0.2 и новее», а навык в шапке
+            # говорил «редакция под коннектор 4.0.0» — две версии одного и
+            # того же в двух местах. Администратор читает инструкцию, агент
+            # читает навык; расходятся они молча, а обнаруживается это на
+            # вызове несуществующего инструмента.
+            вер = lambda s: set(re.findall(r"\b(\d+[.,]\d+(?:[.,]\d+)?)\b", s))
+            из_инструкции = вер(nameflat(atext))
+            разошлись = []
+            for f in tool_named:
+                шапка = "\n".join(nfc(read_text(f)).splitlines()[:60])
+                свои = {v for v in вер(nameflat(шапка))
+                        if re.search(r"коннектор\w*\s*\*{0,2}" + re.escape(v)
+                                     + r"|верси\w+\s*\*{0,2}" + re.escape(v),
+                                     nameflat(шапка))}
+                чужие = свои - из_инструкции
+                if свои and из_инструкции and чужие:
+                    разошлись.append(
+                        f"«{f.parent.name}»: навык говорит {', '.join(sorted(чужие))}, "
+                        f"инструкция — {', '.join(sorted(из_инструкции))}")
+            chk("Я12", "версия коннектора в навыке и в инструкции — одна",
+                not разошлись,
+                "; ".join(разошлись[:2]) + " — две версии одного и того же в двух "
+                "местах расходятся молча: администратор ставит по инструкции, "
+                "агент работает по навыку",
+                код="Я12-ВЕРСИЯ-РАСХОДИТСЯ")
+
+        # Я14 — карточки агентов, зависящих от навыка пространства, активируют
+        # его принудительно и первым шагом.
+        #
+        # Повод: на прогоне 25.08.2026 навык был установлен, поле «когда
+        # применять» подходило дословно — и агент его не взял, пока
+        # пользователь не назвал вслух. Поле «когда применять» — механизм
+        # подбора, а не гарантия; там, где от навыка зависит корректность,
+        # вероятности недостаточно.
+        #
+        # Зависимость определяется по базе знаний: если в папке агента лежит
+        # файл, ссылающийся на навык пространства, — агент зависимый.
+        for f in space_skills:
+            nm, _ = имя_навыка(read_text(f))
+            if not nm:
+                continue          # безымянный назван выше, и это его дефект
+            dependent = sorted({
+                p.parent.name for p in files
+                if "база знаний" in nameflat(str(p.relative_to(root)))
+                and nameflat(nm) in nameflat(read_text(p))})
+            if not dependent:
+                continue
+            cards_all = [p for p in files
+                         if any(n in nameflat(str(p.relative_to(root)))
+                                for n in ("описания агентов", "карточка"))]
+            bad = []
+            for c in cards_all:
+                t = nameflat(read_text(c))
+                if nameflat(nm) not in t:
+                    continue                       # карточка не про этот навык
+                # активация принудительная: навык назван в блоке активации,
+                # а не только в перечне рекомендуемых навыков
+                head = t.split(nameflat("## Рекомендуемые"))[0]
+                if nameflat(nm) not in head or "активируй" not in head:
+                    bad.append(c.name)
+            chk("Я14", f"«{nm}»: активация принудительная, а не по «когда применять»",
+                not bad,
+                "в карточке навык назван только в перечне рекомендуемых — это "
+                "надежда на автоподхват, а он не сработал на прогоне: "
+                + ", ".join(bad[:3]))
+            promised = [c.name for c in cards_all
+                        if "подхватывает его сам" in nameflat(read_text(c))]
+            chk("Я14", f"«{nm}»: карточка не обещает автоподхват",
+                not promised,
+                "принудительная активация и обещание автоподхвата — два описания "
+                "одного и того же, они разойдутся: " + ", ".join(promised[:3]))
+
+    # Я13 — у коннектора нашей разработки есть собственная проверка.
+    #
+    # Повод: в сервере Seldon готовность заказа определялась поиском слов
+    # «выполнен» и «готов», а поставщик отвечает `ready`. Готовый заказ не
+    # распознавался ни разу — выгрузка не работала с первого дня и выглядела
+    # как перебои у поставщика. Рядом жил NameError в инструменте поиска
+    # компаний. Оба ловятся секундной проверкой на ответах из руководства
+    # поставщика; ни один не ловится чтением кода.
+    # Корень коннектора — папка, содержащая `src`, а не сам `src`: проверка
+    # лежит рядом с ним, в `scripts/`, и по `src` её не видно.
+    servers = sorted({p for f in files
+                      if f.name.endswith(".py") and "server" in nameflat(f.name)
+                      for p in f.parents
+                      if (p / "src").is_dir()})
+    for srv in servers:
+        checks = [f for f in files
+                  if f.suffix == ".py" and srv in f.parents
+                  and any(k in nameflat(f.name)
+                          for k in ("selfcheck", "selftest", "проверк"))]
+        chk("Я13", f"«{srv.name}»: у коннектора есть своя проверка",
+            bool(checks),
+            "сервер — слой поставки, у которого не было собственного уровня "
+            "проверки; два дефекта в нём дожили до показа клиенту")
+        for c in checks:
+            t = nameflat(read_text(c))
+            chk("Я13", f"«{c.name}»: примеры взяты из руководства поставщика",
+                "руководств" in t or "документаци" in t,
+                "проверка на придуманных ответах подтверждает наше "
+                "представление, а не поведение поставщика")
+
+    # Я15 / Я16 — поведенческие паттерны П1 и П2 из behaviour_patterns.md.
+    #
+    # Оба проверяются только у агентов, к которым признак применим: искать
+    # объект по написанному человеком названию умеет не каждый агент, и
+    # требовать правило от того, кто работает с приложенными документами, —
+    # значит завести шум, из-за которого вердикт перестанут читать.
+    # Исключается только навык ПРОСТРАНСТВА — по признаку «навык» И
+    # «пространств» в пути. Прежнее условие отбрасывало любой путь со словом
+    # «навык», и после переименования файлов в `00_Навык_<slug>.md` оно
+    # отбросило вообще все навыки агентов: Я12, Я15, Я16 и Я18 молча
+    # переехали на копии из базы знаний, а на пакетные файлы не смотрели.
+    # Четвёртый случай «переименовали здесь, а искали там» за неделю.
+    в_пространстве = lambda f: (
+        "навык" in nameflat(str(f.relative_to(root)))
+        and "пространств" in nameflat(str(f.relative_to(root))))
+    agent_skills = [f for f in files if is_skill(f)
+                    and not в_пространстве(f) and not is_archive(f)]
+    # Я12 для навыка АГЕНТА: тот же навык лежит и в пакете, и в базе знаний
+    # пространства. Пока копии совпадают, это безобидно; расходятся они молча.
+    # Реальный случай: раздел принудительной активации дописан в пакетные
+    # копии и не дописан в те, что лежат в базе знаний, — администратор,
+    # загружающий базу знаний, поставил бы прежнюю редакцию.
+    by_agent: dict[str, list[Path]] = {}
+    for f in agent_skills:
+        # Опознаём копии по объявленному имени, каким бы полем оно ни было
+        # объявлено. Чтение по одному полю `name:` не видело навыков,
+        # заполненных по форме платформы, и сравнивать копии было нечем.
+        нм, _ = имя_навыка(read_text(f))
+        if нм:
+            by_agent.setdefault(nameflat(нм), []).append(f)
+    forked = []
+    for nm, fs in by_agent.items():
+        h = {hashlib.md5(flat(read_text(p)).encode()).hexdigest() for p in fs}
+        if len(h) > 1:
+            forked.append(f"«{nm}»: {len(fs)} копии, содержимое разное")
+    chk("Я12", "копии навыка агента в поставке совпадают", not forked,
+        "; ".join(forked[:3]) + " — установлена окажется та, что попалась под "
+        "руку, и это не будет видно ни по одному признаку")
+
+    for f in agent_skills:
+        raw = nfc(read_text(f)).lower()      # переводы строк ЗНАЧИМЫ: маркер
+        t = flat(raw)                        # реестра ищется построчно
+
+        # Признак П1: агент ищет сущность по названию, которое пишет человек.
+        #
+        # Первая редакция признака ловила `basis_find_company` где угодно и
+        # записывала в применимые двух агентов, которые зовут этот метод по
+        # ОКВЭД и региону — то есть перечисляют, а не опознают. Признак — не
+        # инструмент, а ОБЪЯВЛЕННЫЙ ВХОД: название или идентификатор
+        # организации, пришедшие от человека.
+        searches = bool(re.search(
+            r"(вход|запрос пользовател|входные данные)[^.\n]{0,60}"
+            r"(назван\w+|наименован\w+|инн|огрн)[^.\n]{0,40}"
+            r"(компани|контрагент|организаци|юрлиц|заказчик)", t))
+        if searches:
+            # Проверяем не слово «точное совпадение», а три составляющие
+            # правила: чем задано точное совпадение, что агент просит у
+            # человека и почему единственный кандидат ничего не доказывает.
+            # Первые две по отдельности проходят на тексте, из которого
+            # правило вырезано, — так уже случалось трижды.
+            miss = []
+            if not re.search(r"точн\w+ совпаден", t):
+                miss.append("не сказано, что совпадение должно быть точным")
+            if not re.search(r"провер\w+[^.\n]{0,40}написани", t):
+                miss.append("нет просьбы проверить написание")
+            if not re.search(r"единственн\w+[^.\n]{0,80}не (подтвержд|доказ|"
+                             r"являет\w* подтвержд)", t):
+                miss.append("единственность кандидата не объявлена "
+                            "неподтверждением")
+            chk("Я15", f"«{f.parent.name}»: правило точного опознания объекта",
+                not miss,
+                "; ".join(miss) + " — агент возьмёт ближайшего похожего и "
+                "выдаст полный результат не по тому объекту")
+
+            # Формула «уточню, либо продолжу» — та самая дыра боевого прогона:
+            # намерение спросить, за которым следует продолжение. В запрете
+            # она стоять может и должна, поэтому смотрим окрестность.
+            holes = []
+            for m in re.finditer(r"(либо|или|иначе)\s+продолж", t):
+                around = t[max(0, m.start() - 160): m.end() + 160]
+                if not re.search(r"запрещ|не допуска|нельзя|дыр", around):
+                    holes.append(t[max(0, m.start() - 60): m.end() + 20])
+            chk("Я15", f"«{f.parent.name}»: нет формулы «уточню, либо продолжу»",
+                not holes,
+                "в логе она читается как согласование, которого не было: "
+                + "; ".join(h.strip() for h in holes[:2]))
+
+        # Я18 — реестр зависимостей активации.
+        #
+        # Повод: боевой прогон ATI.SU 28.08.2026. Карточка активировала только
+        # собственный навык агента; навык коннектора, стоявший в пространстве,
+        # не активировался — на панели «Навыки» был один навык. Агент дошёл до
+        # вызова площадки, получил отказ авторизации и выдал пользователю
+        # подробный разбор отсутствия токена вместо работы. Ответ выглядит
+        # компетентным, и потому дефект незаметен: агент делает не ту работу.
+        #
+        # Я14 это не ловила: она срабатывает, только если навык пространства
+        # ЛЕЖИТ В ПОСТАВКЕ, а навык коннектора живёт на платформе.
+        # Признак применимости — коннектор НАЗВАН ПОИМЁННО в навыке:
+        # «коннектор `atisu-mcp`», «коннектор `seldon`». Общий детектор Я11
+        # здесь не годится: он гасит срабатывание по соседству со словами
+        # отрицания, а в их список попало и тире — в тексте про коннекторы
+        # тире встречается почти всегда, и признак срабатывал через раз.
+        назван_коннектор = re.search(
+            r"коннектор\w*\s+[`«\"']([a-zA-Zа-яА-Я][\w .\-]{2,40})[`»\"']",
+            nfc(read_text(f)))
+        if назван_коннектор:
+            # Носитель правил вызова коннектора называют и «навыком
+            # коннектора», и «навыком пространства» — на разных клиентах
+            # прижились оба слова. Проверяется не слово, а то, что навык
+            # НАЗВАН ПОИМЁННО и активируется до работы.
+            # Разметка между словом и именем не значима: «навык пространства
+            # **«Работа с данными Seldon»**» — то же самое, что без звёздочек.
+            # Первая редакция шаблона их не допускала и молча не видела
+            # выделенное жирным имя — тот же класс, что и промах по звёздочкам
+            # в карте джоб.
+            m = re.search(r"навык\w*\s+(?:коннектора|пространства)\s*[*_]{0,2}\s*"
+                          r"[«\"']([^»\"'\n]{3,80})[»\"']", raw)
+            chk("Я18", f"«{f.parent.name}»: навык коннектора назван в навыке агента",
+                bool(m),
+                "нет строки «навык коннектора «<имя>»» — карточку читают при "
+                "старте, навык читается при активации; напомнить о коннекторе "
+                "во втором месте больше некому")
+            if m:
+                имя_к = m.group(1).strip()
+                # Раздел активации — до первого содержательного раздела:
+                # «активируй» в середине файла активацией не является.
+                голова = raw[:raw.find("\n## 1.")] if "\n## 1." in raw else raw
+                chk("Я18",
+                    f"«{f.parent.name}»: активация коннектора — в разделе 0",
+                    "активируй" in голова and nameflat(имя_к) in nameflat(голова),
+                    "имя названо, но не в блоке активации перед работой")
+
+                # Карточка того же агента называет тот же навык, и раньше
+                # собственного: навык агента ссылается на порядок вызовов как
+                # на уже известный.
+                своя = [c for c in files
+                        if c.parent == f.parent and "карточк" in nameflat(c.name)]
+                for c in своя:
+                    tc = nameflat(read_text(c))
+                    есть = nameflat(имя_к) in tc
+                    chk("Я18", f"«{c.name}»: навык коннектора назван в карточке",
+                        есть,
+                        f"«{имя_к}» — зависимость, о которой карточка молчит; "
+                        "активируется то, что названо")
+                    if есть:
+                        свой, _ = имя_навыка(raw)
+                        # Порядок считается ВНУТРИ блока активации, а не по
+                        # всей карточке: имя агента стоит в поле «Название» в
+                        # самом верху, и по целому файлу свой навык всегда
+                        # «раньше» — проверка ловила бы правильные карточки.
+                        блок = nameflat(блок_активации(read_text(c)))
+                        if свой and блок:
+                            i_k = блок.find(nameflat(имя_к))
+                            i_s = блок.find(nameflat(свой))
+                            chk("Я18",
+                                f"«{c.name}»: коннектор активируется раньше своего навыка",
+                                i_s < 0 or i_k < i_s,
+                                "навык агента ссылается на порядок вызовов как "
+                                "на уже известный: прочитанный первым, он "
+                                "начинает действовать раньше, чем узнаёт правила")
+
+        # Признак П2: агент делает выводы о внешней организации.
+        # Признак: агент **делает выводы** о внешней организации.
+        #
+        # Голое слово «контрагент» признаком не является, и это стоило трёх
+        # ложных красных строк на портфеле MGC: у агента консолидации это
+        # «анализ субконто „Контрагенты“», у казначейского дайджеста —
+        # «сколько пришло от этого контрагента», у договорного — «параметры
+        # сделки: контрагент, номенклатура». Ни один из них не оценивает
+        # организацию, и требовать от них реестр раскрытия бессмысленно.
+        #
+        # Тот же класс, что и «проверять артефакт, а не слово»: признак,
+        # срабатывающий на упоминание, тестирует словарь, а не поведение.
+        # Признак ищется в ОБЪЯВЛЕННОМ НАЗНАЧЕНИИ агента, а не по всему файлу.
+        #
+        # Три попытки подряд промахнулись мимо, и каждая — по одной причине:
+        # слово «контрагент» встречается там, где организацию никто не
+        # оценивает. У агента консолидации это имя отчёта 1С «Анализ субконто:
+        # Контрагенты», у казначейского дайджеста — «все контрагенты
+        # помечаются „не проверено“», в разделе «чего агент не делает» —
+        # прямой отказ от такой работы. Близость слов не отличает работу от
+        # упоминания.
+        #
+        # Отличает назначение: агент, оценивающий организацию, пишет это в
+        # «когда применять» и в разделе «Назначение». Там и смотрим — это
+        # объявление о работе, а не след данных внутри модулей.
+        когда = re.search(r"^когда применять:\s*\|?\s*$(.*?)^\w+:",
+                          raw, re.M | re.S)
+        назн = re.search(r"\n#{2,}\s*1\.?\s*назначени[ея][^\n]*\n(.*?)(?=\n#{2,}\s|\Z)",
+                         raw, re.I | re.S)
+        объявление = " ".join(x.group(1) for x in (когда, назн) if x)
+        # Отрицательная половина «когда применять» называет чужую работу.
+        объявление = re.split(r"не бери навык", объявление, 1, flags=re.I)[0]
+        judges = bool(re.search(
+            r"благонадёжн|благонадежн|"
+            r"карточк\w*\s+компании|конкурентн\w+\s+сред|"
+            r"(?:провер|оцен|разбор|справк|досье|скоринг|посмотр|собра)\w*"
+            r"[^.\n]{0,40}"
+            r"(?:контрагент|компани|предприяти|организаци|заказчик|инн|огрн|завод)",
+            flat(объявление)))
+        if judges:
+            m = re.search(r"^[-*\s_]*реестр раскрыти[ея][*_]*\s*[:—-]\s*(.+)$",
+                          raw, re.M)
+            chk("Я16", f"«{f.parent.name}»: реестр раскрытия назван поимённо",
+                bool(m),
+                "нет строки «Реестр раскрытия: …» — данные поставщика приняты "
+                "за весь публичный след организации; на прогоне агент пошёл в "
+                "реестр только после того, как его назвали вслух")
+            if m:
+                val = m.group(1)
+                chk("Я16", f"«{f.parent.name}»: у реестра назван адрес",
+                    bool(re.search(r"[a-z0-9-]+\.(ru|com|org|рф)", val)),
+                    "название без адреса агент разыщет поиском и может уйти "
+                    "на агрегатор, а не в сам реестр: " + val[:60])
+                # Реестр, названный один раз в списке источников, шагом сбора
+                # не является — ровно так он и не сработал на прогоне.
+                nm = re.split(r"[\s(,—]", val.strip("*_ "), 1)[0]
+                mods = t.split("## 6.", 1)[-1].split("## 8.", 1)[0]
+                chk("Я16", f"«{f.parent.name}»: обращение к реестру — шаг модуля",
+                    bool(nm) and nm in mods,
+                    f"«{nm}» назван, но не встроен в модули сбора: "
+                    "«при необходимости» означает «никогда»")
+
+    # Я17 — папка = агент: артефакты одного агента лежат вместе, и второго
+    # экземпляра у них нет.
+    #
+    # Повод: раскладка по типу артефакта (`02_Описания_агентов/`,
+    # `03_Слэш_команды/`, отдельные спецификации) держала карточку и команды
+    # в двух местах — в папке типа и в папке пакета. Байт в байт до первой
+    # правки: 27.08.2026 правка агента 1 ПТМ ушла в папку пакета и не ушла в
+    # папку типа, копии разошлись в тот же час. Дефект не в человеке, а в
+    # раскладке, которая хранит два экземпляра одного файла.
+    pkg_root = None
+    for d in dirs:
+        if "пакеты агентов" in nameflat(d.name):
+            if pkg_root is None or len(d.parts) < len(pkg_root.parts):
+                pkg_root = d
+    # Пакеты агентов лежат в ОДНОМ месте. Две папки «Пакеты агентов» в одной
+    # поставке — это девять ZIP-ов дважды, и вопрос «какой свежее» решается
+    # датой файла, то есть не решается.
+    pkg_dirs = [d for d in dirs if "пакеты агентов" in nameflat(d.name)]
+    chk("Я17", "папка пакетов агентов одна", len(pkg_dirs) <= 1,
+        "их " + str(len(pkg_dirs)) + ": "
+        + ", ".join(str(d.relative_to(root)) for d in pkg_dirs[:3])
+        + " — разделение «рабочее/поставляемое» решается версией и архивом, "
+          "а не вторым местом")
+
+    if pkg_root is not None:
+        агенты = [d for d in dirs if d.parent == pkg_root]
+
+        # Сколько агентов в комплекте — и что об этом говорят документы.
+        #
+        # Повод: у ПТМ портфель вырос с семи агентов до восьми, а фразы
+        # «у всех семи агентов есть подпапка `проверка/`» и «один файл на все
+        # семь агентов» остались в семи картах состава и в инструкции по
+        # сборке. Администратор проверил бы семь и не заметил восьмого; а у
+        # восьмого папки приёмочных прогонов как раз и не было.
+        #
+        # Тот же предикат, что и у счёта шагов активации: объявленное
+        # числительное против фактического счёта. Разница только в том, что
+        # там считались пункты списка, а здесь — папки агентов.
+        объявления, обещанные_всем = [], []
+        for f in files:
+            путь = nameflat(str(f.relative_to(root)))
+            if f.suffix.lower() != ".md":
+                continue
+            # Датированный файл — снимок прошлого: «на 21.08 было семь
+            # агентов» верно и остаётся верным. Журналы, бэклоги, находки и
+            # протоколы — тоже история, а не инструкция к действию.
+            # Дата ищется в ИМЕНИ файла, а не во всём пути: имя папки агента
+            # всегда содержит дату сборки (`5_tz-tp-compliance_V4_13.09.26`),
+            # и проверка по пути молча выключала себя на всех пакетах разом.
+            if re.search(r"\d{2}[._-]\d{2}[._-]\d{2}", nameflat(f.name)) or any(
+                    x in путь for x in ("журнал", "беклог", "находк",
+                                        "протокол", "контур", "отчет")):
+                continue
+            t = nameflat(read_text(f))
+            for m in СЧЁТ_АГЕНТОВ.finditer(t):
+                зн = m.group(1)
+                число = int(зн) if зн.isdigit() else ЧИСЛИТЕЛЬНЫЕ[зн]
+                if число != len(агенты):
+                    объявления.append(f"{f.name}: «{m.group(0).strip()}»")
+            for m in У_КАЖДОГО.finditer(nfc(read_text(f))):
+                обещанные_всем.append((f.name, m.group(1).strip("/ ")))
+        chk("Н", f"числительное «все N агентов» совпадает со счётом ({len(агенты)})",
+            not объявления,
+            "; ".join(объявления[:4])
+            + (f" (всего {len(объявления)})" if len(объявления) > 4 else "")
+            + " — портфель вырос, фраза осталась: человек проверит столько, "
+              "сколько написано, и последнего агента не заметит",
+            код="Н-СЧЁТ-АГЕНТОВ")
+
+        # «У каждого агента есть папка X» — обещание, проверяемое по папкам.
+        нарушено = []
+        корпуса = [агенты] + [kb_units(kb) for kb in kbs]
+        for src, что in dict.fromkeys(обещанные_всем):
+            for корпус in корпуса:
+                нет = [d.name for d in корпус
+                       if not any(nameflat(p.name) == nameflat(что)
+                                  for p in d.iterdir())]
+                # Обещание относится к тому корпусу папок, где названное
+                # вообще встречается: `проверка/` живёт в базе знаний, а не
+                # в пакетах, и требовать её от пакетов бессмысленно.
+                if нет and len(нет) < len(корпус):
+                    нарушено.append(f"«{что}» ({src}): нет у {', '.join(нет[:3])}")
+        chk("Я17", "обещание «у каждого агента есть …» выполняется",
+            not нарушено,
+            "; ".join(нарушено[:3]) + " — документ обещает то, чего нет; "
+            "проверять будут по документу",
+            код="Я17-У-КАЖДОГО")
+
+        for a in агенты:
+            свои = [f for f in files if a in f.parents]
+            имена = [nameflat(f.name) for f in свои]
+            нет = []
+            # Навык — открытым файлом, всегда. Архив его не заменяет: текст
+            # внутри ZIP не прочитать глазами, не сравнить версиями и не найти
+            # поиском по папке. И имя файла содержит slug — семь файлов
+            # `SKILL.md` в поиске неразличимы.
+            навык = [f for f in свои if f.suffix.lower() == ".md"
+                     and ("навык" in nameflat(f.name)
+                          or nameflat(f.name) == "skill.md")]
+            if not навык:
+                нет.append("навык открытым файлом (00_Навык_<slug>.md)")
+            elif all(nameflat(f.name) == "skill.md" for f in навык):
+                нет.append("в имени навыка нет slug агента")
+            карточки = [n for n in имена if "карточк" in n or "агент" in n]
+            if not карточки:
+                нет.append("карточка")
+            elif not any("карточка агента" in n for n in карточки):
+                # «Карточка» в комплекте бывает не одна: карточка компании,
+                # карточка сценария, карточка риска. По имени файла должно
+                # быть видно, карточка ЧЕГО это, без открытия.
+                нет.append("в имени карточки нет слова «агента»")
+            if not any("команд" in n or "run agent" in n for n in имена):
+                нет.append("команды")
+            if not any("спецификац" in n for n in имена):
+                нет.append("спецификация")
+            chk("Я17", f"«{a.name}»: в папке агента всё, что его составляет",
+                not нет,
+                "не хватает: " + ", ".join(нет) + " — единица передачи это "
+                "один агент; собирать его из четырёх мест каждый раз заново "
+                "значит один из четырёх забыть")
+
+            # Архив в папке агента — не «сборка рядом», а второй экземпляр,
+            # который нельзя прочитать. Сверять его с открытым файлом нет
+            # смысла: правильный ответ один — архива здесь быть не должно.
+            свои_zip = [f for f in свои if f.suffix.lower() == ".zip"]
+            chk("Я17", f"«{a.name}»: в папке агента нет архивов",
+                not свои_zip,
+                ", ".join(z.name for z in свои_zip[:3])
+                + " — упаковку под загрузку в конструктор делает человек "
+                  "перед самой загрузкой, а в поставке лежат открытые файлы")
+
+    # Я21 — след переиспользования.
+    #
+    # Проверить, что исполнитель заглянул в базу шаблонов, нельзя: намерение
+    # не артефакт. Проверяется след — файл, в котором названо, что
+    # рассмотрено, что взято и что отвергнуто с причиной. Пустой список
+    # кандидатов допустим: базa бывает пуста или задача действительно новая, —
+    # но он объявляется строкой, а не молчанием. Молчание неотличимо от «мы
+    # туда не смотрели», и рядом с готовым шаблоном пишется новый агент.
+    след = [f for f in files
+            if f.suffix.lower() == ".md"
+            and "переиспользован" in nameflat(f.name)
+            and not is_archive(f.relative_to(root))]
+    chk("Я21", "в комплекте есть след переиспользования", bool(след),
+        "нет файла `00_ПЕРЕИСПОЛЬЗОВАНИЕ.md` — не видно, смотрели ли в базу "
+        "шаблонов. «Мы это обдумали» и «мы этого не видели» через месяц "
+        "неразличимы, а агент пишется с нуля рядом с готовым",
+        код="Я21-СЛЕДА-НЕТ")
+    if след:
+        текст = nameflat(read_text(след[0]))
+        # Решение обязано быть названо: взяли или не взяли, и почему.
+        назван_исход = any(с in текст for с in
+                           ("взято", "взяли", "не взято", "кандидатов нет",
+                            "ничего не подошло", "собран с нуля"))
+        chk("Я21", "названо, что взято и что отвергнуто", назван_исход,
+            f"«{след[0].name}»: файл есть, но исхода в нём нет — перечень "
+            "рассмотренного без решения не отличается от отсутствия перечня",
+            код="Я21-БЕЗ-ИСХОДА")
+        есть_причина = any(с in текст for с in
+                           ("потому что", "причина", "не подош", "иначе",
+                            "другой клиент", "другая отрасл", "база пуст"))
+        chk("Я21", "у отказа от шаблона названа причина", есть_причина,
+            f"«{след[0].name}»: отказ без причины через месяц читается как "
+            "«не посмотрели»",
+            код="Я21-БЕЗ-ПРИЧИНЫ", мягкая=True)
+
+    # Н — нумерация папок: один номер в одном каталоге принадлежит одному.
+    #
+    # Повод: сборка MCG, 03.09.2026. В корне оказались `07_Коннекторы` (от
+    # скрипта разворота) и `07_Сценарий_показа` (заведена руками — номер
+    # выбран наугад, потому что канонического пути для Д1–Д3 не было). Рядом
+    # тем же способом: `01_Discovery` против `01_База_знаний_workspace`.
+    #
+    # Почему не поймала ни одна прежняя проверка: все они ищут артефакты по
+    # элементам Я1–Я20, а не по номерам, — и правильно делают, иначе ломались
+    # бы от любой перенумерации. Но у нумерации не было своего уровня, а
+    # проверка, у которой нет собственного уровня, не существует.
+    #
+    # `00_` исключён намеренно: это класс «вход и подготовка», а не
+    # идентификатор. Его носят сразу шесть сущностей — четыре файла навигации
+    # и две папки, — и краснеть на этом значило бы уйти в другую крайность.
+    по_родителям: dict[Path, dict[str, list[str]]] = {}
+    for d in dirs:
+        if is_archive(d.relative_to(root)):
+            continue
+        m = re.match(r"^(\d{2})_", nfc(d.name))
+        if not m or m.group(1) == "00":
+            continue
+        по_родителям.setdefault(d.parent, {}).setdefault(m.group(1), []).append(d.name)
+    столкновения = []
+    for родитель, номера in sorted(по_родителям.items()):
+        for номер, имена in sorted(номера.items()):
+            уник = sorted(set(имена))
+            if len(уник) > 1:
+                где = str(родитель.relative_to(root)) or "корень"
+                столкновения.append(f"{где}: {номер}_ → " + ", ".join(уник))
+    chk("Н", "номер папки в одном каталоге принадлежит одному",
+        not столкновения,
+        "; ".join(столкновения)
+        + " — номер выбирают наугад ровно тогда, когда канонического пути нет; "
+          "реестр номеров — в `delivery_composition.md`",
+        код="Н-НОМЕР-ЗАНЯТ")
+
+    # Мягкая: расхождение с реестром номеров. Мягкая, а не жёсткая, потому что
+    # два комплекта разошлись с реестром до того, как он появился, и
+    # переименовывать рабочую поставку ради единообразия — риск без выигрыша.
+    РЕЕСТР_НОМЕРОВ = {
+        "01": ("база знаний", ("база знан", "knowledge")),
+        "02": ("discovery", ("discovery", "дискавери")),
+        "03": ("синтетика для показа", ("синтетик", "synthetic")),
+        "04": ("пакеты агентов", ("пакеты агент",)),
+        "05": ("интеграции и коннекторы", ("интеграц", "коннектор")),
+        "06": ("навыки пространства", ("навык", "workspace", "пространств")),
+        "07": ("пилот", ("пилот",)),
+        "08": ("сценарий показа", ("сценарий показ", "показ", "демонстрац")),
+        "09": ("контур улучшения", ("контур улучш", "находк", "бэклог")),
+    }
+    # Отступление, названное в самой поставке, — не дефект.
+    #
+    # Требовать единообразия от комплектов, собранных до появления реестра,
+    # значит переименовывать рабочую поставку ради красоты. Проверка требует
+    # не совпадения, а **объявления**: расхождение, названное в файле
+    # «что убрано и почему», принимается. Молчаливое — нет, потому что
+    # молчаливое неотличимо от забытого.
+    объявления = " ".join(
+        nameflat(read_text(f)) for f in files
+        if f.suffix.lower() == ".md"
+        and any(s in nameflat(f.name)
+                for s in ("что убрано", "что не собрано", "отступлен")))
+    чужие = []
+    for d in dirs:
+        if is_archive(d.relative_to(root)) or d.parent != root:
+            continue
+        m = re.match(r"^(\d{2})_", nfc(d.name))
+        if not m or m.group(1) not in РЕЕСТР_НОМЕРОВ:
+            continue
+        имя_ожид, признаки = РЕЕСТР_НОМЕРОВ[m.group(1)]
+        if any(п in nameflat(d.name) for п in признаки):
+            continue
+        if nameflat(d.name) in объявления:
+            continue                       # отступление названо в поставке
+        чужие.append(f"{d.name} — по реестру {m.group(1)}_ это «{имя_ожид}»")
+    chk("Н", "номера папок совпадают с реестром либо расхождение объявлено",
+        not чужие,
+        "; ".join(чужие) + " — либо папка не на своём номере, либо реестр "
+        "устарел. Разойтись молча они не должны: назовите отступление в "
+        "«что убрано и почему», и проверка его примет",
+        код="Н-РЕЕСТР", мягкая=True)
+
+    # Я20 — версия и дата на артефактах агента.
+    #
+    # Повод: правка навыка агента рыночной разведки ПТМ (Федресурс, остановка
+    # при неточном совпадении) не была отмечена нигде. Папка осталась
+    # `V2_21.08.26`, во фронтматтере стояло `version: 1.0.0` — константа
+    # шаблона платформы, — а в карточке и командах не было ни версии, ни
+    # даты. Для человека, у которого агент уже стоит в пространстве, правка,
+    # ничем не отмеченная, неотличима от её отсутствия.
+    if pkg_root is not None:
+        for a in [d for d in dirs if d.parent == pkg_root]:
+            свои = [f for f in files if a in f.parents
+                    and f.suffix.lower() == ".md"]
+            роли = {
+                "навык": [f for f in свои if is_skill(f)],
+                "карточка": [f for f in свои if "карточк" in nameflat(f.name)],
+                "команды": [f for f in свои if "команд" in nameflat(f.name)],
+                "журнал изменений": [f for f in свои
+                                     if "журнал" in nameflat(f.name)],
+            }
+            найдено, без_версии = {}, []
+            for роль, лист in роли.items():
+                if not лист:
+                    continue                       # состав проверяет Я17
+                v = версия_артефакта(read_text(лист[0]))
+                if v is None:
+                    без_версии.append(f"{роль} ({лист[0].name})")
+                else:
+                    найдено[роль] = v
+            chk("Я20", f"«{a.name}»: у артефактов есть версия и дата",
+                not без_версии,
+                "без версии: " + ", ".join(без_версии)
+                + " — правка, не отмеченная версией, неотличима от её "
+                  "отсутствия: человек не знает, переносить ли агента заново",
+                код="Я20-ВЕРСИЯ-НЕТ")
+
+            версии = {v[0] for v in найдено.values()}
+            chk("Я20", f"«{a.name}»: версии артефактов совпадают",
+                len(версии) <= 1,
+                "; ".join(f"{р}: {v[0]}" for р, v in sorted(найдено.items()))
+                + " — в пространство уедет половина правки, и какая именно, "
+                  "выяснится на прогоне у пользователя",
+                код="Я20-ВЕРСИИ-РАЗНЫЕ")
+
+            в_имени = re.search(r"[_\- ][Vv](\d+)", nfc(a.name))
+            if в_имени and версии:
+                chk("Я20", f"«{a.name}»: версия в имени папки — та же",
+                    f"V{в_имени.group(1)}" in версии,
+                    f"папка говорит V{в_имени.group(1)}, внутри "
+                    + ", ".join(sorted(версии))
+                    + " — в проводнике видно одно, в файле другое, и "
+                      "переносят обычно по тому, что видно",
+                    код="Я20-ПАПКА-ВЕРСИЯ")
+
+            журнал = роли["журнал изменений"]
+            if журнал:
+                # Что именно переносить в пространство — навык, карточку,
+                # команды. Без этой строки человек, у которого агент уже
+                # развёрнут, идёт сравнивать файлы глазами или, чаще,
+                # пересобирает пространство целиком. Пересборка стоит часа и
+                # теряет историю сессий; строка стоит одного предложения.
+                т = nameflat(read_text(журнал[0]))
+                chk("Я20", f"«{a.name}»: журнал говорит, что переносить в пространство",
+                    сказано_что_переносить(т),
+                    "не сказано, что обновлять: навык, карточку или команды. "
+                    "Человек либо сверяет файлы глазами, либо пересобирает "
+                    "пространство целиком",
+                    код="Я20-ЧТО-ПЕРЕНОСИТЬ", мягкая=True)
+            if журнал and версии:
+                текст = nameflat(read_text(журнал[0]))
+                chk("Я20", f"«{a.name}»: журнал называет текущую версию",
+                    any(nameflat(v) in текст for v in версии),
+                    "журнал не упоминает " + ", ".join(sorted(версии))
+                    + " — версия сменилась, а чем она отличается от прошлой, "
+                      "не записано нигде",
+                    код="Я20-ЖУРНАЛ-БЕЗ-ВЕРСИИ")
+
+    # Я4 — карточка и команды. Нужны на ОБОИХ поколениях: архив везёт
+    # содержимое навыка и команды, но поля карточки человек заполняет руками.
+    # Ищем по ПУТИ, а не по имени файла: файлы внутри папки агента называются
+    # по агенту («01_Карточка_tender-docs-analyst.md»), и проверка по одному
+    # фиксированному имени их не видит.
+    cards = [f for f in files
+             if any(n in nameflat(str(f.relative_to(root)))
+                    for n in ("карточка", "описания агентов", "описание агента"))
+             or re.match(r"0?1?[_ ]*агент[_ ]", nameflat(f.name))]
+    chk("Я4", "карточка агента — готовые значения полей формы", bool(cards),
+        "без готовых значений сборщик придумает название, описание и «Инструкцию» "
+        "сам, и у агента будет идентичность, которой нет ни в одном документе; "
+        "архив карточку не заполняет ни на одном поколении")
+    for f in cards:
+        t = read_text(f)
+        chk("Я4", f"«{f.name}»: есть все три поля формы",
+            all(k in nameflat(t) for k in ("название", "описание", "инструкц")),
+            "поле, которого нет в карточке, заполнят по памяти")
+        # Две допустимые формы блока: один навык («Активируй навык X») и
+        # два с заданным порядком («Активируй последовательно два навыка»),
+        # когда агент зависит от навыка пространства — см. Я14.
+        chk("Я4", f"«{f.name}»: блок активации навыка на месте",
+            bool(re.search(r"активируй\s+(навык|последовательно)", nameflat(t))),
+            "без блока активации карточка не связана с логикой — агент отвечает "
+            "общими словами, и внешне это выглядит работающим")
+
+    cmds = [f for f in files
+            if any(n in nameflat(str(f.relative_to(root)))
+                   for n in ("команды", "слэш", "run agent"))]
+    chk("Я4", "тела команд заданы", bool(cmds),
+        "команда без тела — это имя в списке")
+
+    # Я17, вторая половина: у карточки и команд агента нет второго экземпляра.
+    #
+    # Сравниваются НЕ содержимое, а принадлежность агенту: две одинаковые
+    # копии — не «пока всё в порядке», а отложенное расхождение. На комплекте
+    # ПТМ шесть агентов из семи совпадали байт в байт ровно до того часа,
+    # когда правку внесли в одну из двух копий.
+    def ядро(имя: str) -> str:
+        s = nameflat(имя)
+        s = re.sub(r"\.(md|docx|zip|pdf)$", "", s)
+        s = re.sub(r"\b(агент|агента|карточка|описание|описания|команды|"
+                   r"слэш|спецификация|run agent|v\d+)\b", " ", s)
+        s = re.sub(r"\d+", " ", s)
+        return re.sub(r"[\s_\-.]+", "", s)
+
+    for вид, набор in (("карточка", cards), ("команды", cmds)):
+        по_агенту: dict[str, list[Path]] = {}
+        for f in набор:
+            k = ядро(f.name)
+            if len(k) >= 4:                     # «01_Агент.md» ядра не даёт
+                по_агенту.setdefault(k, []).append(f)
+        дубли = [f"{k}: " + ", ".join(str(p.relative_to(root)) for p in v[:2])
+                 for k, v in по_агенту.items() if len(v) > 1]
+        chk("Я17", f"{вид} агента существует в одном экземпляре", not дубли,
+            "; ".join(дубли[:3]) + " — совпадающие копии расходятся при первой "
+            "же правке, и увидеть это можно только сравнением файлов; "
+            "если нужен вид «все карточки подряд», это оглавление со ссылками, "
+            "а не копии")
+    # Отсылка «расскажи, как с тобой работать», за которой на той же строке
+    # ничего содержательного нет, — пересказ имени команды, а не тело.
+    # Хвост из точки, кавычки и обратного апострофа значения не имеет и
+    # именно на нём первая версия проверки промахнулась.
+    # ВАЖНО: здесь нельзя пользоваться nameflat — он схлопывает и переводы
+    # строк, файл превращается в одну строку, и `$` с re.M перестаёт значить
+    # «конец строки». Первая версия этой проверки из-за этого не поймала
+    # ровно тот дефект, ради которого написана.
+    linewise = lambda s: unicodedata.normalize("NFC", s).lower().replace("ё", "е")
+    STUB = re.compile(r"расскажи,?\s+как\s+с\s+тобой\s+работать[ \t.,!`»\"'*)_-]*$",
+                      re.M)
+    stub = [f.name for f in cmds if STUB.search(linewise(read_text(f)))]
+    chk("Я4", "тело команды «Как со мной работать» — не однострочная отсылка",
+        not stub,
+        "пересказ имени команды вместо тела отдаёт содержание первого ответа "
+        "модели, и он разный при каждом нажатии: " + ", ".join(stub[:3]))
+
+    # Команда «Как со мной работать» должна СУЩЕСТВОВАТЬ, а не только быть
+    # непустой. Проверка выше молчала на комплекте, где такой команды нет
+    # вовсе: она искала заглушку среди имеющихся тел и на пустом множестве
+    # проходила. Это тот же класс, что «ворота обязаны говорить правду» —
+    # проверка без предмета не считается пройденной.
+    if cmds:
+        # Только перечни команд АГЕНТА: `run-agent.md` из пакета Поколения 2 —
+        # упаковочная константа с одной командой запуска, справки о себе в
+        # ней быть не должно, и требовать её там значит ловить не то.
+        agent_cmds = [f for f in cmds if "run agent" not in nameflat(f.name)]
+        no_help = [f.name for f in agent_cmds
+                   if "как со мной работать" not in nameflat(read_text(f))]
+        chk("Я4", "у каждого агента есть команда «Как со мной работать»",
+            not no_help,
+            "самая быстрая диагностика неподцепившегося навыка — спросить агента "
+            "о нём самом; без этой команды участник воркшопа не знает, что "
+            "спрашивать: " + ", ".join(no_help[:3]))
+
+        # У каждой команды своё тело. «Тело команды по умолчанию» на несколько
+        # команд — это одна команда с несколькими именами: пользователь видит
+        # выбор, которого нет.
+        shared = [f.name for f in cmds
+                  if re.search(r"тело команды по умолчанию|общее тело команд|"
+                               r"единое тело для всех команд", nameflat(read_text(f)))]
+        chk("Я4", "у каждой команды своё тело, а не одно общее",
+            not shared,
+            "команды перечислены таблицей, а тело одно: формально их несколько, "
+            "фактически одна с разными именами — " + ", ".join(shared[:3]))
+
+    # Я5 — спецификация
+    chk("Я5", "спецификация/сценарий агента (.docx)",
+        any(f.suffix.lower() == ".docx" for f in files),
+        "нет ни одного .docx — владельцу процесса нечего согласовывать")
+
+    # Я6 — инструкция по сборке
+    chk("Я6", "инструкция по сборке пространства",
+        any_name(files, "сборка", "сборке", "инструкция по сбор"),
+        "пакет разворачивается, но его не развернут")
+
+    # Я7 — карта джоб
+    chk("Я7", "карта джоб — работа словами роли",
+        any_name(files, "карта джоб", "джоб"),
+        "нет языка, на котором агент объясняется человеку")
+
+    # Я8 — точка входа
+    chk("Я8", "точка входа для человека",
+        any_name(files, "читай первым", "как использовать", "точка входа",
+                 "как работать с комплектом"),
+        "инструкция по сборке отвечает администратору; сотруднику не отвечает никто")
+
+    # Я19 — происхождение и режим данных.
+    #
+    # Одно правило на два повода. Обезличенный набор через полгода неотличим
+    # от выдуманного и уезжает к другому клиенту; фикстура, поданная как живой
+    # вызов, делает неразличимыми «работает» и «работало на прошлой неделе».
+    # Метка ставится строкой в карте состава той папки, где данные лежат.
+    ПРОИСХОЖДЕНИЕ = ("синтетика", "обезличено", "реальное")
+    РЕЖИМ = ("фикстура", "кэш", "живой вызов")
+    корни_данных = [d for d in dirs
+                    if any(x in nameflat(d.name)
+                           for x in ("синтетик", "synthetic", "калибров",
+                                     "демо вход"))
+                    and not is_archive(d.relative_to(root))]
+
+    def объявлено(d) -> bool:
+        """В папке есть карта состава с обеими метками."""
+        for f in files:
+            if f.parent != d or f.suffix.lower() != ".md":
+                continue
+            if not any(s in nameflat(f.name)
+                       for s in ("что здесь", "состав", "readme")):
+                continue
+            txt = nameflat(read_text(f))
+            есть_п = "происхождение" in txt and any(v in txt
+                                                    for v in ПРОИСХОЖДЕНИЕ)
+            есть_р = "режим" in txt and any(v in txt for v in РЕЖИМ)
+            if есть_п and есть_р:
+                return True
+        return False
+
+    # Объявление делается ОДИН раз на набор данных: либо в корне набора
+    # (`03_Синтетика_для_демо/` или `калибровка/`), либо, если наборы у каждого
+    # агента свои, — в папке агента внутри него. Требовать объявление от
+    # каждой вложенной папки бессмысленно: первая редакция просила его у
+    # `01_rag_knowledge_base` внутри синтетики, то есть у части набора.
+    нет_меток = []
+    for корень in корни_данных:
+        if объявлено(корень):
+            continue
+        дети = [d for d in dirs if d.parent == корень
+                and not is_archive(d.relative_to(root))
+                and any(f.parent == d or d in f.parents for f in files)]
+        if not дети:
+            нет_меток.append(str(корень.relative_to(root)))
+            continue
+        без = [str(d.relative_to(root)) for d in дети if not объявлено(d)]
+        if без:
+            нет_меток += без
+    if корни_данных:
+        chk("Я19", "у данных объявлены происхождение и режим", not нет_меток,
+            "; ".join(нет_меток[:4])
+            + (f" (всего {len(нет_меток)})" if len(нет_меток) > 4 else "")
+            + " — молчание здесь неотличимо от «мы не решили», а через месяц "
+              "от «данные настоящие»",
+            код="Я19-ПРОИСХОЖДЕНИЕ")
+
+    # Я9 — синтетика
+    # Синтетика теперь папка с файлами, а не архив: имя носит ПАПКА, и
+    # проверка, смотревшая только на файлы, перестала её видеть — первый же
+    # побочный эффект отказа от архивов, и его поймала фикстура, а не прогон.
+    synth = (any_name(files, "synthetic", "синтетик")
+             or bool(find_dirs(dirs, "synthetic", "синтетик")))
+    if task == "пилот":
+        chk("Я9", "синтетика для показа (если будет показ)", True,
+            "" if synth else "синтетики нет — допустимо для пилота без показа")
+    else:
+        chk("Я9", "синтетика для показа", synth,
+            "показывать на реальных данных нельзя, а показывать надо")
+
+    # послабление демонстрации — проверяется в обе стороны
+    calib = find_dirs(dirs, "калибровочн", "калибровка")
+    if task == "демонстрация":
+        chk("К", "калибровочные данные НЕ вынесены на демонстрацию", not calib,
+            "реальные документы клиента не выносятся на внешний показ")
+    else:
+        chk("К", "калибровочные данные", bool(calib),
+            "нет яруса калибровки — точность не с чем сверять")
+        # Папка есть — ещё не значит, что в ней данные. Ровно так ярус
+        # калибровки пережил переименование механики: папку создали, README
+        # перенесли, документы — нет. Структурно комплект выглядел целым.
+        empty = [str(d.relative_to(root)) for d in calib
+                 if not [f for f in d.rglob("*")
+                         if f.is_file() and not any_name([f], "readme")]]
+        chk("К", "в ярусе калибровки есть сами документы, а не только README",
+            not empty,
+            "папка есть, данных нет — точность по-прежнему не с чем сверять: "
+            + ", ".join(empty[:3]))
+
+
+def block_manifests(root: Path, files) -> None:
+    """Файл, обещанный описанием папки, обязан в ней лежать.
+
+    Описание состава (`README`, «что здесь и чего здесь нет») перечисляет
+    файлы в обратных апострофах. Это манифест, и он проверяем: обещанное
+    имя ищется в той же папке.
+
+    Проверка общая, но повод конкретный: при переименовании механики
+    «приёмка» → «калибровка» папку создали и README перенесли, а документы
+    — нет. README продолжал перечислять комплект из тридцати файлов, лежала
+    в папке одна строка текста. Ни одна проверка этого не видела, потому
+    что все смотрели на наличие папки.
+
+    Групповые обещания вида `ТТ/РД/*.pdf` (16 файлов) сверяются по числу:
+    именно на нём вскрылось, что README обещал 17, а в исходном архиве
+    было 16.
+    """
+    manifests = [f for f in files
+                 if f.suffix.lower() == ".md"
+                 and any_name([f], "readme", "что здесь", "состав")]
+    if not manifests:
+        return
+
+    # Манифест может ссылаться и на файл вне своей папки — например, на
+    # `SKILL.md` агента, который лежит уровнем выше. Поэтому обещанное имя
+    # ищется сначала в папке, затем во всём комплекте: цель проверки — «файл
+    # существует», а не «файл лежит именно здесь». Более строгая версия
+    # давала ложные срабатывания на каждом README.
+    everywhere = {nameflat(p.name) for p in root.rglob("*") if p.is_file()}
+
+    # Упоминание файла САМОГО СКИЛЛА — цитата, а не обещание: справочники
+    # скилла в поставку не входят и входить не должны. Список берётся из
+    # скилла, а не угадывается по виду имени.
+    own = {nameflat(p.name)
+           for d in ("references", "scripts")
+           for p in (Path(__file__).resolve().parent.parent / d).glob("*")
+           if p.is_file()}
+
+    bad_named, bad_count = [], []
+    for m in manifests:
+        folder = m.parent
+        have = {nameflat(p.name) for p in folder.rglob("*") if p.is_file()}
+        have |= everywhere
+        txt = nfc(read_text(m))
+
+        for name in re.findall(r"`([^`*\n]+\.(?:docx|pdf|xlsx|xlsm|csv|md|zip|rar|txt))`", txt):
+            base = nameflat(Path(nfc(name)).name)
+            if base in have or base in own:
+                continue
+            # Отсутствие, объяснённое рядом, — решение, а не потеря.
+            near = txt[max(0, txt.find(name) - 400): txt.find(name) + 400]
+            if re.search(r"не загруж|не вход|удалён|удален|распакован|намеренно|"
+                         r"нет и не|чего здесь нет", near, re.I):
+                continue
+            bad_named.append(f"{folder.name}: {name[:52]}")
+
+        for pat, num in re.findall(r"`([^`\n]*\*[^`\n]*)`\s*\((\d+)\s*файл", txt):
+            got = len(list(folder.glob(nfc(pat))))
+            if got != int(num):
+                bad_count.append(f"{folder.name}: «{pat}» обещано {num}, найдено {got}")
+
+    # М — переименование доведено до конца: старое имя не осталось в именах
+    # команд и в путях.
+    #
+    # Повод: механику переименовали «приёмка» → «калибровка». Папки и пути
+    # переименовали, а имена команд — нет: в пространстве осталась команда
+    # «2.5 Приёмка: реальный тендер ДГК», ведущая в папку `приемка/`, которой
+    # больше не существует. Комплект при этом проходил все проверки: файлы на
+    # месте, содержание верное, расходились только названия.
+    #
+    # Источник истины — не наше представление, а сам комплект: переименование
+    # объявлено в файле изъятий строкой «переименовани… «X» → «Y»».
+    renames = []
+    for f in files:
+        if not any_name([f], "что убрано", "что изменилось", "журнал изменений"):
+            continue
+        for a, b in re.findall(
+                r"переименовани\w*[^«»\n]{0,40}«([^»]{3,40})»\s*(?:→|->|на)\s*«([^»]{3,40})»",
+                nfc(read_text(f))):
+            renames.append((a.strip(), b.strip(), f.name))
+
+    for old, new, src in dict.fromkeys(
+            (a, b, s) for a, b, s in renames):
+        stem = nameflat(old)[:6]                 # грубая основа слова
+        residue = []
+        for f in files:
+            rel = str(f.relative_to(root))
+            if any_name([f], "что убрано", "что изменилось", "журнал изменений"):
+                continue                          # там переименование и описано
+            # Слой коннектора живёт своей жизнью: у него своя приёмка, свои
+            # версии и свои протоколы. «Протокол живой приёмки коннектора» —
+            # не остаток переименования «приёмка агентов → калибровка», это
+            # другое слово в другом смысле. Признак ловил совпадение основы,
+            # а не предмет — тот же класс, что и «контрагент» в Я16.
+            if "коннектор" in nameflat(rel):
+                continue
+            if stem in nameflat(rel):
+                residue.append(f"путь {rel}")
+                continue
+            t = nfc(read_text(f))
+            for line in t.split("\n"):
+                low = nameflat(line)
+                named = ("имя команды" in low
+                         or re.match(r"\s*#+\s*\d+\.\d+\s", line))
+                path = re.findall(r"`([^`\n]*/[^`\n]*)`", line)
+                # Оговорка про коннектор действует и на УПОМИНАНИЕ, а не
+                # только на путь самого файла. Манифест комплекта перечисляет
+                # все файлы подряд, в том числе `07_Коннектор_Seldon/Протокол
+                # _боевой_приёмки…`, — и проверка объявляла остатком
+                # переименования строку в генерируемом файле. Чинить это в
+                # комплекте было бы нечем: манифест пишет скрипт.
+                if named and stem in low and "коннектор" not in low:
+                    residue.append(f"{f.name}: {line.strip()[:70]}")
+                    continue
+                чужие = [p for p in path if stem in nameflat(p)
+                         and "коннектор" not in nameflat(p)]
+                if чужие:
+                    residue.append(f"{f.name}: путь `{чужие[0][:50]}`")
+        chk("М", f"переименование «{old}» → «{new}» доведено до конца",
+            not residue,
+            f"старое имя осталось (объявлено в «{src}»): "
+            + "; ".join(list(dict.fromkeys(residue))[:3]))
+
+    # Ф — обязательная форма результата не пересказана короче в другом файле.
+    #
+    # Повод: у агента сверки ТЗ/ТП обязательная строка сверки задана навыком
+    # как `пунктов ТЗ · строк в матрице · обработано документов K из M ·
+    # не прочитано`. В карточке и в приёмочном кейсе жила её усечённая
+    # версия — первые два числа. Блокирующий шлюз `coverage_check` опирался
+    # на вторую половину строки, а приёмка проверяла первую: механика,
+    # введённая против молчаливой неполноты, приёмкой не проверялась.
+    #
+    # Признак ровно такой: одна форма — префикс другой. Это не «похожие
+    # формулировки», а буквально обрезанная копия, и потому проверяется
+    # дословно, без нормализации смысла.
+    code = {}                                    # фрагмент → множество файлов
+    for f in files:
+        if f.suffix.lower() != ".md":
+            continue
+        for frag in re.findall(r"`([^`\n]{25,200})`", nfc(read_text(f))):
+            frag = frag.strip()
+            if "·" not in frag and ":" not in frag:
+                continue                          # не шаблон формы
+            # Ссылка — не форма результата. Двоеточие в `https://` делало
+            # каждый адрес кандидатом, и укороченный адрес читался как
+            # обрезанная копия формы: `…/client-api` против
+            # `…/client-api/doc`. Признак срабатывал на синтаксисе URL.
+            if re.match(r"^[a-z]+://|^www\.", frag, re.I) or "://" in frag:
+                continue
+            code.setdefault(frag, set()).add(f.name)
+
+    truncated = []
+    frags = sorted(code, key=len, reverse=True)
+    for i, long in enumerate(frags):
+        for short in frags[i + 1:]:
+            if len(short) < 20 or not long.startswith(short):
+                continue
+            only_short = code[short] - code[long]
+            if only_short:
+                truncated.append(
+                    f"«{short[:45]}…» ({', '.join(sorted(only_short)[:2])}) — "
+                    f"обрезанная копия формы из {', '.join(sorted(code[long])[:2])}")
+    chk("Ф", "обязательная форма результата нигде не пересказана короче",
+        not truncated,
+        "усечённая копия формы: артефакт, который её проверяет, не увидит "
+        "того, ради чего форму вводили — "
+        + "; ".join(list(dict.fromkeys(truncated))[:3]))
+
+    chk("М", "файлы, обещанные описанием состава, лежат в папке", not bad_named,
+        "описание обещает то, чего нет: " + "; ".join(bad_named[:4]))
+    chk("М", "числа в групповых обещаниях совпадают с содержимым", not bad_count,
+        "; ".join(bad_count[:3]))
+
+
+def block_regression(root: Path, prev: Path) -> None:
+    """Итеративная правка не убавляет комплект молча.
+
+    Сравнение с предыдущей версией комплекта: файл, который был и исчез, —
+    это либо осознанное решение, либо потеря. Молчаливой третьей
+    возможности быть не должно.
+
+    Сравниваются имена файлов, а не пути: при переименовании папки путь
+    меняется законно, а содержимое исчезать не должно. Именно этот случай
+    проверка и создана ловить.
+    """
+    def names(p: Path) -> dict[str, str]:
+        out = {}
+        for f in p.rglob("*"):
+            if f.is_file() and f.name != ".DS_Store" and not is_archive(
+                    f.relative_to(p)):
+                out.setdefault(nameflat(f.name), str(f.relative_to(p)))
+        return out
+
+    was, now = names(prev), names(root)
+    gone = sorted(was.keys() - now.keys())
+
+    # Объявленные изъятия — решение, а не потеря. Объявляются в файле
+    # «что убрано и почему» в корне поставки: причина живёт рядом с
+    # комплектом, а не во флаге командной строки, который никто не увидит.
+    #
+    # Без такого списка проверка становится вечно красной при первом же
+    # законном переименовании — и её отключают вместе со всем, что она
+    # ловила. Это уже случалось с другой проверкой.
+    decl = ""
+    for f in root.glob("*.md"):
+        if any(k in nameflat(f.name)
+               for k in ("что убрано", "что изменилось", "журнал изменений")):
+            decl += nameflat(read_text(f))
+
+    lost = [was[k] for k in gone if k not in decl]
+    accepted = len(gone) - len(lost)
+
+    chk("Р", f"ничего не потеряно относительно «{prev.name[:40]}»", not lost,
+        f"было {len(was)} файлов, стало {len(now)}; "
+        f"исчезло {len(gone)}, из них объявлено {accepted}, "
+        f"необъяснённых {len(lost)}: "
+        + "; ".join(x[:52] for x in lost[:5]) + ("…" if len(lost) > 5 else "")
+        + " — либо вернуть, либо назвать в файле «что убрано и почему»")
+
+
+def сказано_что_переносить(текст: str) -> bool:
+    """Сказал ли журнал, что нести в пространство: предмет рядом с действием.
+
+    Ищется не готовый оборот «что переносить», а **предмет** (навык, карточка,
+    команды, база знаний) рядом с **действием** над ним: «перезалить навык»,
+    «переименовать навык в каталоге», «заменить карточку». Первая редакция
+    искала три конкретных оборота и краснела на журнале, где то же самое
+    сказано другими словами, — проверка, написанная под формулировку,
+    проверяет формулировку, а не наличие правила.
+
+    Текст подаётся уже нормализованным (`nameflat`).
+    """
+    предмет = r"навык\w*|карточк\w*|команд\w*|инструкци\w*|базу знаний"
+    действие = (r"перенес\w*|перенос\w*|переносить|перезали\w*|"
+                r"замен\w*|обнов\w*|переименова\w*|пересозда\w*|"
+                r"внести|загрузи\w*|полож\w*")
+    return bool(re.search(rf"({действие})[^.\n]{{0,60}}({предмет})", текст)
+                or re.search(rf"({предмет})[^.\n]{{0,60}}({действие})", текст))
+
+
+def template_is_blank(path: Path) -> bool:
+    """Пуст ли шаблон: считаем строки данных на листе ввода."""
+    try:
+        import openpyxl
+    except ImportError:
+        return True  # без библиотеки не судим — отдельная строка это скажет
+    try:
+        wb = openpyxl.load_workbook(path, data_only=True)
+    except Exception:
+        return True
+    for ws in wb.worksheets:
+        if not any(k in nameflat(ws.title) for k in ("ввод", "данные", "input")):
+            continue
+        filled = 0
+        for row in ws.iter_rows(min_row=2):
+            vals = [c.value for c in row
+                    if c.value not in (None, "") and not str(c.value).startswith("=")]
+            if len(vals) >= 2:
+                filled += 1
+        if filled >= 3:
+            return False
+    return True
+
+
+# ─────────────────────────── надстройки ───────────────────────────
+
+EXTRAS = {
+    "демонстрация": [
+        ("Д1", ("сценарий показа",), "сценарий показа с хронометражом",
+         "без хронометража показ расползается"),
+        ("Д2", ("отказ", "не заработало"), "сценарий отказа",
+         "не «расскажу словами», а конкретный файл и конкретная фраза"),
+        ("Д3", ("запасн", "backup"), "запасной результат",
+         "отказ на показе гарантирован — вопрос только чей"),
+    ],
+    "воркшоп": [
+        ("В1", ("workspace", "пространств"), "единое пространство на всех агентов",
+         "участники работают в одном пространстве, а не в восьми"),
+        ("В2", ("мастер-сценар", "мастер сценар"), "мастер-сценарий сессии",
+         "роли и тайминг ведущего"),
+    ],
+    "пилот": [
+        ("П1", ("baseline", "как есть"), "baseline формы «как есть»",
+         "без него улучшение нечем измерить"),
+        ("П2", ("регламент сопровожд", "каденц"), "регламент сопровождения и каденция", ""),
+        ("П3", ("встраивани",), "карты встраивания в процесс", ""),
+        ("П4", ("реестр метрик", "метрик"), "реестр метрик пилота", ""),
+        ("П5", ("контур улучшен", "эталонн"), "контур улучшения",
+         "формы отдаются пустыми ДО первого показа результата"),
+        ("П6", ("приёмк", "приемк"), "протокол приёмки", ""),
+        ("П7", ("иб ", "иб_", "безопасност"), "ИБ-соглашение на одну страницу", ""),
+        ("П8", ("карта доступа", "l1", "доступа"), "карта доступа L1→L2→L3", ""),
+        ("П9", ("бэклог", "беклог"), "бэклог доработок агента",
+         "запрос клиента без состояния живёт в переписке и обсуждается "
+         "заново на каждой встрече"),
+        ("П10", ("методолог",), "методология оценки эффекта под клиента",
+         "как считается эффект — предмет договорённости до старта, а не "
+         "объяснение постфактум; знание берётся из скилла feo-ai-methodology, "
+         "здесь проверяется артефакт"),
+        ("П11", ("расчётн", "расчетн", "фэо", "феэо", "эффект"),
+         "расчётная модель эффекта",
+         "карточка кейса и расчёт должны считаться из одних параметров; "
+         "таблица под конкретный разговор расходится с моделью при первой правке"),
+        ("П12", ("evals",), "приёмочные кейсы на каждого агента",
+         "уровень развёрнутого агента — единственный, который до сих пор "
+         "проверялся глазами: комплект может быть собран верно, а версия в "
+         "пространстве остаться прежней"),
+        ("П13", ("прогон",), "отчёт приёмочного прогона не старше версии агента",
+         "прогон, сделанный до последней правки навыка, проверял другую "
+         "версию — и зелёный отчёт о ней ничего не говорит о нынешней"),
+    ],
+}
+
+
+def модель_эффекта(files) -> tuple[bool, str]:
+    """П11 по артефакту: это .xlsx, в нём есть расчёт, и он не заполнен.
+
+    Проверка по имени файла пропускает и пустой `.docx`, названный «модель», и
+    таблицу с готовыми числами. Первое — заготовка, второе — обещание: клиент
+    примет наши допущения за свои данные. Оба выглядят как собранный элемент.
+    """
+    кандидаты = [f for f in files
+                 if f.suffix.lower() in (".xlsx", ".xlsm")
+                 and any(k in nameflat(f.name)
+                         for k in ("расчётн", "расчетн", "фэо", "эффект", "модель"))]
+    if not кандидаты:
+        return False, "нет .xlsx с расчётной моделью эффекта"
+    try:
+        import openpyxl
+    except ImportError:
+        return True, ""  # без библиотеки не судим: отдельная строка это скажет
+    for f in кандидаты:
+        try:
+            wb = openpyxl.load_workbook(f, data_only=False)
+        except Exception:
+            continue
+        листы = [nameflat(w.title) for w in wb.worksheets]
+        if not any("расчёт" in л or "расчет" in л for л in листы):
+            return False, (f"«{f.name}»: нет листа расчёта — это не модель, "
+                           f"а таблица параметров")
+        return True, ""
+    return False, "файл модели не читается"
+
+
+ПРОГОН_ДАТА = re.compile(r"(\d{4})[.\-](\d{2})[.\-](\d{2})|(\d{2})[.\-](\d{2})[.\-](\d{2})(?!\d)")
+
+
+def _дата(текст: str):
+    """Дата из имени файла или папки: ГГГГ-ММ-ДД либо ДД.ММ.ГГ.
+
+    Возвращает сравнимый кортеж. Обе формы живут в проекте одновременно: в
+    именах папок агентов стоит сборочная дата `13.09.26`, в отчётах прогонов —
+    ISO. Приводить их к одной форме в файлах поздно, а сравнивать надо.
+    """
+    m = ПРОГОН_ДАТА.search(nfc(текст))
+    if not m:
+        return None
+    if m.group(1):
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    гг = int(m.group(6))
+    return (2000 + гг, int(m.group(5)), int(m.group(4)))
+
+
+def приёмочные_наборы(files, dirs):
+    """П12 и П13 по артефактам, а не по наличию слова «evals» в комплекте.
+
+    Считается соответствие агент → набор кейсов → отчёт прогона. Один набор на
+    восемь агентов закрывал бы проверку по имени файла и не закрывал бы ничего
+    по существу: у ПТМ так и было — кейсы существовали только у агента № 8.
+    """
+    pkg_root = None
+    for d in dirs:
+        if "пакеты агентов" in nameflat(d.name):
+            if pkg_root is None or len(d.parts) < len(pkg_root.parts):
+                pkg_root = d
+    if pkg_root is None:
+        return None
+    агенты = [d for d in dirs
+              if d.parent == pkg_root and re.match(r"^\d+[_\- ]", d.name)]
+    if not агенты:
+        return None
+
+    наборы = [f for f in files if nameflat(f.name).startswith("evals")]
+    отчёты = [f for f in files if nameflat(f.name).startswith("прогон")]
+
+    def свой(файлы, папка):
+        """Файл принадлежит агенту: по слагу в пути либо по номеру в имени."""
+        n = re.match(r"^(\d+)", папка.name).group(1)
+        sl = nameflat(слаг(папка.name))
+        out = []
+        for f in файлы:
+            путь = nameflat(str(f))
+            имя = nameflat(f.name)
+            if sl and sl in путь:
+                out.append(f)
+            elif re.search(rf"\b(агент|агента)?\s*{n}\b", имя):
+                out.append(f)
+        return out
+
+    # Набор засчитывается только измеримый: есть блокирующий кейс и есть блок
+    # машинных признаков. Набор, описанный прозой, проходит проверку по имени
+    # файла и не выносит ни одного вердикта — ровно тот класс, где зелёное
+    # означает «не проверяли», а не «проверено».
+    def измеримый(f: Path) -> bool:
+        t = nfc(read_text(f))
+        return bool(re.search(r"(?m)^#{2,4}\s*Б-", t)) and "**Признаки:" in t
+
+    без_набора, непроверяемые = [], []
+    for d in агенты:
+        свои = свой(наборы, d)
+        if not свои:
+            без_набора.append(d.name)
+        elif not any(измеримый(f) for f in свои):
+            непроверяемые.append(d.name)
+    ок12 = not без_набора and not непроверяемые
+    части12 = []
+    if без_набора:
+        части12.append("наборов кейсов нет у: " + ", ".join(без_набора[:4])
+                       + (f" (всего {len(без_набора)})" if len(без_набора) > 4 else ""))
+    if непроверяемые:
+        части12.append("набор есть, но без машинных признаков — вердикт "
+                       "выносить нечем: " + ", ".join(непроверяемые[:4])
+                       + (f" (всего {len(непроверяемые)})"
+                          if len(непроверяемые) > 4 else ""))
+    почему12 = "; ".join(части12) or "их поведение в пространстве не проверяет ничто"
+
+    просрочены, без_отчёта = [], []
+    for d in агенты:
+        свои_отчёты = свой(отчёты, d)
+        if not свои_отчёты:
+            без_отчёта.append(d.name)
+            continue
+        версия = _дата(d.name)
+        свежий = max((x for x in (_дата(f.name) for f in свои_отчёты) if x),
+                     default=None)
+        if версия and свежий and свежий < версия:
+            просрочены.append(f"{d.name}: прогон {свежий[0]}-{свежий[1]:02d}-"
+                              f"{свежий[2]:02d}")
+    ок13 = not без_отчёта and not просрочены
+    части = []
+    if без_отчёта:
+        части.append("прогона не было у: " + ", ".join(без_отчёта[:4])
+                     + (f" (всего {len(без_отчёта)})" if len(без_отчёта) > 4 else ""))
+    if просрочены:
+        части.append("прогон старше версии — " + "; ".join(просрочены[:3]))
+    return (ок12, почему12), (ок13, "; ".join(части))
+
+
+def extras(files, dirs, task: str) -> None:
+    both = files + dirs
+    приём = приёмочные_наборы(files, dirs)
+    for code, needles, name, why in EXTRAS.get(task, []):
+        if code == "П11":
+            ок, почему = модель_эффекта(files)
+            chk(code, name, ок, почему or why)
+            continue
+        if code in ("П12", "П13"):
+            # Нет папки пакетов агентов — нечего и соотносить: это не портфель.
+            if приём is None:
+                continue
+            ок, почему = приём[0 if code == "П12" else 1]
+            chk(code, name, ок, почему or why)
+            continue
+        chk(code, name, any_name(both, *needles), why)
+
+
+# ───────────────────── уровень агентизации ─────────────────────
+#
+# Повод — ATI.SU, 15.09.2026. Портфель был собран по джобам («провести
+# сделку», «ответить на потребность», «собрать попутный рейс») и развалился
+# на первом же вопросе: кто чей контрагент. Работа не может быть контрагентом
+# работы; сделку заключают стороны. Пересборка по сторонам вернула сделке
+# участников.
+#
+# Правило «агент = одна джоба» верно НА СВОЁМ УРОВНЕ — внутри организации.
+# Между организациями единица другая, и отступление законно только целиком:
+# уровень объявлен, отступление названо вслух, взамен введено правило «агент =
+# одна сторона, единица результата задаётся командой». Проверяется артефакт:
+# объявление, таблица единиц и произнесённое отступление, а не слово «сторона»
+# где-нибудь в тексте.
+#
+# Проверка адресована СПЕЦИФИКАЦИИ ПОРТФЕЛЯ ИЛИ ПОСТАВКИ, а не спецификациям
+# отдельных агентов: уровень — решение о составе портфеля целиком. Нет такого
+# файла — режим одиночный, проверять нечего, и блок молчит.
+
+УРОВЕНЬ_ОБЪЯВЛЕН = re.compile(
+    r"уровень[ _]агентизац|единица[ _]состава|"
+    r"уровень\s*[::]\s*(внутренн|рыночн)|агент\s*=\s*одна\s+сторона")
+РЫНОЧНЫЙ = re.compile(
+    r"рыночн\w*\s+(уровень|контур)|уровень\s*[::]\s*рыночн|"
+    r"единица[ _]состава[^\n]{0,80}сторон|агент\s*=\s*одна\s+сторона|"
+    r"сторона\s+рынка")
+ОТСТУПЛЕНИЕ = re.compile(
+    r"одна\s+джоба[\s\S]{0,600}?(не\s+выполня|отступлен|сознательно|отказ)|"
+    r"(отступлен|сознательно|отказ\w*)[\s\S]{0,600}?одна\s+джоба")
+СТОРОНА_ПОЛЕ = re.compile(r"(?mi)^\s*\|?\s*\*{0,2}сторона\*{0,2}\s*[::]")
+
+
+def _строк_в_таблице_единиц(t: str) -> int:
+    """Строк данных в таблице, чья шапка называет единицу результата.
+
+    Считается именно таблица, а не упоминание: фраза «у каждой команды своя
+    единица результата» правило не выполняет — по ней нельзя проверить ни
+    одну команду.
+    """
+    строки = t.split("\n")
+    for i, ln in enumerate(строки):
+        if ln.strip().startswith("|") and "единица результата" in ln.lower():
+            j, n = i + 2, 0
+            while j < len(строки) and строки[j].strip().startswith("|"):
+                n += 1
+                j += 1
+            return n
+    return 0
+
+
+def block_level(root: Path, files, dirs) -> None:
+    спецификации = []
+    for f in files:
+        if f.suffix.lower() != ".md":
+            continue
+        имя = nameflat(f.name)
+        путь = nameflat(str(f.relative_to(root)))
+        if "специфик" not in имя:
+            continue
+        if not ("портфел" in имя or "поставк" in имя):
+            continue          # спецификация отдельного агента — не про уровень
+        if any(x in путь for x in ("архив", "к удалению", "черновик")):
+            continue
+        спецификации.append(f)
+
+    if not спецификации:
+        return                # одиночный агент: единица состава не выбирается
+
+    объявили, рыночные = [], []
+    for f in спецификации:
+        t = nfc(read_text(f))
+        if УРОВЕНЬ_ОБЪЯВЛЕН.search(t.lower()):
+            объявили.append(f)
+            if РЫНОЧНЫЙ.search(t.lower()):
+                рыночные.append((f, t))
+
+    chk("У", "уровень агентизации объявлен в спецификации", bool(объявили),
+        ", ".join(f.name for f in спецификации[:3])
+        + " — единица состава выбрана молча. Внутренний контур режется по "
+          "джобам, рыночный — по сторонам сделки; молчаливо выбранная единица "
+          "разъезжается с составом на второй волне",
+        код="У-УРОВЕНЬ-НЕ-ОБЪЯВЛЕН", мягкая=True)
+
+    for f, t in рыночные:
+        строк = _строк_в_таблице_единиц(t)
+        chk("У", f"рыночный уровень: таблица «команда → единица результата» ({f.name})",
+            строк >= 3,
+            f"строк в таблице: {строк} — отказ от правила «агент = одна джоба» "
+            "без замены превращается в «агент делает всё». Единицу задаёт "
+            "команда, и она проверяется счётом строк ответа",
+            код="У-РЫНОК-БЕЗ-ЕДИНИЦ")
+
+        chk("У", f"рыночный уровень: отступление от правила джобы названо вслух ({f.name})",
+            bool(ОТСТУПЛЕНИЕ.search(t.lower())),
+            "в спецификации не сказано, что правило «агент = одна джоба» здесь "
+            "сознательно не выполняется — читатель решит, что о нём забыли, а "
+            "следующая волна соберётся по джобам",
+            код="У-РЫНОК-БЕЗ-ОТСТУПЛЕНИЯ")
+
+        стороны = len(СТОРОНА_ПОЛЕ.findall(t))
+        chk("У", f"рыночный уровень: стороны названы поимённо ({f.name})",
+            стороны >= 2,
+            f"полей «сторона:» найдено {стороны} — у сделки должно быть не "
+            "меньше двух участников, и каждый адресуется по своей стороне, "
+            "иначе контрагенту неизвестно, к кому обращаться",
+            код="У-РЫНОК-БЕЗ-СТОРОН")
+
+
+
+# ─────────────────────────── вывод ───────────────────────────
+
+def main() -> int:
+    ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument("--папка", dest="root", required=True)
+    ap.add_argument("--задача", dest="task", required=True,
+                    choices=["демонстрация", "воркшоп", "пилот"])
+    ap.add_argument("--поколение", dest="gen", default="2", choices=["2", "1.5"])
+    ap.add_argument("--расчётная", dest="calc", action="store_true",
+                    help="расчётная задача — обязательно расчётное ядро (Я10)")
+    ap.add_argument("--расчетная", dest="calc", action="store_true")
+    ap.add_argument("--против", dest="prev", default=None,
+                    help="предыдущая версия комплекта: сверка, что ничего "
+                         "не пропало при итеративной правке")
+    a = ap.parse_args()
+
+    root = resolve_root(a.root)
+    if root is None:
+        print(f"нет папки: {a.root!r}")
+        print("Если в пути есть кириллица — проверьте форму Unicode: macOS хранит")
+        print("имена в NFD, а вставленный из документа путь обычно в NFC.")
+        return 1
+
+    files, dirs, arch = walk(root)
+    core(root, files, dirs, a.gen, a.calc, a.task)
+    block_graph(root, files, dirs)
+    block_relations(root, files, dirs)
+    block_level(root, files, dirs)
+    extras(files, dirs, a.task)
+    block_manifests(root, files)
+
+    if a.prev:
+        prev = resolve_root(a.prev)
+        if prev is None:
+            print(f"нет папки для сравнения: {a.prev!r}")
+            return 1
+        block_regression(root, prev)
+
+    # Корни архивов: сама папка с архивным именем, не всё её содержимое.
+    tops = sorted({str(p.relative_to(root)) for p in arch
+                   if is_archive(Path(p.name))
+                   and not is_archive(p.parent.relative_to(root))})
+    chk("Ч", "в поставке нет архивов, черновиков и старых версий", not arch,
+        "администратор может загрузить в пространство старую базу знаний, и "
+        "агент получит два описания одного и того же: "
+        + ", ".join(list(tops)[:3]))
+
+    print(f"\nСВЕРКА С ЦЕЛЕВЫМ СОСТАВОМ ПОСТАВКИ — {root.name}")
+    print(f"задача: {a.task} · поколение: {a.gen} · "
+          f"расчётная: {'да' if a.calc else 'нет'}\n")
+    for level, name, ok, why, soft in RESULTS:
+        mark = "WARN" if (not ok and soft) else ("PASS" if ok else "FAIL")
+        print(f"  [{mark}] {level:<4} {name}")
+        if not ok and why:
+            print(f"          └─ {why}")
+
+    жёсткие = [r for r in RESULTS if not r[4]]
+    мягкие = [r for r in RESULTS if r[4]]
+    провалы = [r for r in жёсткие if not r[2]]
+    core_n = [r for r in RESULTS if r[0].startswith(("Я", "К", "СВ", "О"))]
+    ext_n = [r for r in RESULTS if not r[0].startswith(("Я", "К", "СВ", "О"))]
+    ck = sum(1 for r in core_n if r[2])
+    ek = sum(1 for r in ext_n if r[2])
+
+    # Некомпенсируемые ворота: Accept = (⋀ жёсткие) ∧ (качество ≥ порог).
+    # Порог намеренно не строгий: шкала качества нужна, чтобы видеть движение,
+    # а решение принимают жёсткие ворота.
+    ПОРОГ = 0.8
+    качество = (sum(1 for r in мягкие if r[2]) / len(мягкие)) if мягкие else 1.0
+    accept = (not провалы) and качество >= ПОРОГ
+
+    print(f"\ndelivery composition check: {'PASS' if accept else 'FAIL'} "
+          f"(ядро {ck}/{len(core_n)}, надстройка «{a.task}» {ek}/{len(ext_n)})")
+    print(f"  жёсткие ворота: {len(жёсткие) - len(провалы)}/{len(жёсткие)}"
+          f" · качество: {качество:.2f} при пороге {ПОРОГ:.2f}"
+          f" · Accept = (⋀ жёсткие) ∧ (качество ≥ порог)")
+    if провалы:
+        print("\nКомплект не передаётся, пока строки FAIL не закрыты.")
+        print("Жёсткий провал не усредняется: никакое количество зелёных")
+        print("мягких проверок его не перевешивает.")
+    elif not accept:
+        print("\nЖёсткие ворота пройдены, качество ниже порога — комплект")
+        print("передаётся только с явным решением человека и записью причины.")
+    return 0 if accept else 1
 
 
 if __name__ == "__main__":

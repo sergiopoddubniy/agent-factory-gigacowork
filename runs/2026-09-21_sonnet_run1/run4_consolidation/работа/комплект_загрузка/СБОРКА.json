@@ -1,0 +1,8 @@
+{
+  "spec": "severny-port-consolidation",
+  "fingerprint": "01146081",
+  "version": "V1",
+  "sha256": "a4efd2f4fcadcde57aeaf429a816722b77c8f8d911d9a2d43e3d494aee97940f",
+  "audit": "PASS",
+  "delivery": "PASS (ядро 59/59, надстройка «демонстрация» 11/11)"
+}

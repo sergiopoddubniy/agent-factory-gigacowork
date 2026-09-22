@@ -1,0 +1,57 @@
+{
+  "date": "2026-09-21",
+  "threshold": "demo",
+  "spec": {
+    "id": "demo-1c-dev-assistant",
+    "version": "S2",
+    "fingerprint": "da5ef3db",
+    "class": "ии-нативный",
+    "contour": "demo",
+    "access": "L0"
+  },
+  "package": {
+    "path": "S2/комплект/demo-1c-dev-assistant",
+    "fingerprint": "2fe1eaeb"
+  },
+  "readiness": {
+    "demo": "PASS",
+    "pilot": "FAIL",
+    "pilot_findings": [
+      "Ф-03-БЕЙЗЛАЙН",
+      "Ф-13-ОРАКУЛ"
+    ]
+  },
+  "audit": {
+    "status": "PASS",
+    "findings": []
+  },
+  "acceptance": {
+    "path": "S2/ПРИЁМОЧНЫЙ_ПРОГОН_run2_S2.md",
+    "cases": {
+      "happy_path": {
+        "verdict": "SKIP",
+        "reason": ""
+      },
+      "typical_tz_report": {
+        "verdict": "PASS",
+        "reason": ""
+      },
+      "same_input_twice": {
+        "verdict": "FAIL",
+        "reason": "остаточная вариативность по существу — следующая правка спецификации (S3): обязательная таблица чек-листа полноты в выходе"
+      }
+    },
+    "hypothesis_status": "не проверена",
+    "conducted_by": "исполнение — Claude Sonnet как модель агента; вердикты — отдельные сессии Claude Sonnet (слепой приёмщик)"
+  },
+  "assumptions": [
+    "блок 3: бейзлайн 6 часов взят по словам руководителя направления, хронометраж не проводился",
+    "блок 11: при переходе на L2 (чтение метаданных через OData) правила этого блока пересматриваются с ИБ.",
+    "блок 13: до получения эталонов проверка ведётся аналитиком по правилам §8, и это записано как отсутствие оракула",
+    "блок 15: дата приёмки не назначена — назначается на день 0 пилота"
+  ],
+  "blockers": [
+    "прогон: FAIL по случаям same_input_twice"
+  ],
+  "verdict": "NOT READY"
+}

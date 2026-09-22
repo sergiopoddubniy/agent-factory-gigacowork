@@ -1,0 +1,29 @@
+{
+  "date": "2026-09-21",
+  "threshold": "demo",
+  "spec": {
+    "id": "severny-port-consolidation",
+    "version": "S1",
+    "fingerprint": "01146081",
+    "class": "ии-помощник",
+    "contour": "demo",
+    "access": "L0"
+  },
+  "package": {
+    "path": "../работа/комплект_загрузка/severny-port-consolidation",
+    "fingerprint": "2c04edb7"
+  },
+  "readiness": {
+    "demo": "PASS",
+    "pilot": "PASS",
+    "pilot_findings": []
+  },
+  "audit": {
+    "status": "PASS",
+    "findings": []
+  },
+  "acceptance": null,
+  "assumptions": [],
+  "blockers": [],
+  "verdict": "READY"
+}

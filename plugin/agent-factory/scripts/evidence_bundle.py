@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from factory_common import (  # noqa: E402
     BLOCKS, EXIT_INPUT, EXIT_OK, EXIT_RED, REQUIRED_CASES, nfc, parse_spec, read_text,
 )
-from check_delivery import audit_package  # noqa: E402
+from check_package import audit_package  # noqa: E402
 from spec_readiness import check as readiness_check  # noqa: E402
 
 HYPOTHESIS_STATUSES = ("не проверена", "подтверждена", "не подтверждена")
