@@ -4,4 +4,3 @@ __pycache__/
 /tmp/
 *.zip
 !plugin/agent-factory/examples/**/*.zip
-!runs/**/*.zip

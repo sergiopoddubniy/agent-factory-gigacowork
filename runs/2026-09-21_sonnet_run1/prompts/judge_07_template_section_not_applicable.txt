@@ -5,9 +5,9 @@
 Ожидание из спецификации: Раздел 4 «Печатные формы» на месте (не удалён и не переставлен), в нём пометка «не применяется» с причиной (заказчик указал, что печатные формы не меняются / доработка их не затрагивает). Остальные разделы шаблона тоже на месте в исходном порядке.
 
 Прочитай инструментом Read:
-- ответ агента: /home/claude/pulkovo/run1c/responses/07_template_section_not_applicable.md
-- входной файл: /home/claude/pulkovo/run1c/materials/шаблон_ТЗ.md
-Затем запиши инструментом Write в файл /home/claude/pulkovo/run1c/verdicts/07_template_section_not_applicable.md текст строго такого формата:
+- ответ агента: /home/claude/factory/run1c/responses/07_template_section_not_applicable.md
+- входной файл: /home/claude/factory/run1c/materials/шаблон_ТЗ.md
+Затем запиши инструментом Write в файл /home/claude/factory/run1c/verdicts/07_template_section_not_applicable.md текст строго такого формата:
 
 Вердикт: PASS
 Причина: 2–5 предложений — что именно совпало или разошлось с ожиданием, с короткой цитатой из ответа агента в кавычках.

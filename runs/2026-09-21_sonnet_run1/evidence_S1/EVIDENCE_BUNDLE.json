@@ -26,7 +26,7 @@
     "findings": []
   },
   "acceptance": {
-    "path": "/home/claude/pulkovo/run1c/ПРИЁМОЧНЫЙ_ПРОГОН_run1_S1.md",
+    "path": "/home/claude/factory/run1c/ПРИЁМОЧНЫЙ_ПРОГОН_run1_S1.md",
     "cases": {
       "happy_path": {
         "verdict": "PASS",

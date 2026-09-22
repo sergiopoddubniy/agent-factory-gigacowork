@@ -6,11 +6,11 @@
 Совпадение формулировок, объёма, порядка слов и текста ТЗ НЕ требуется. Дополнительно (не влияет на вердикт, но записать): совпадает ли состав реестра вопросов (номера строк со статусом `вопрос`/`конфликт`), совпадает ли раздел «Миграция данных» (везде вопрос заказчику?), совпадает ли строка сверки.
 
 Прочитай инструментом Read все три ответа:
-- /home/claude/pulkovo/run3/responses/01_happy_path.md
-- /home/claude/pulkovo/run3/responses/10_happy_path_repeat.md
-- /home/claude/pulkovo/run3/responses/11_happy_path_repeat2.md
+- /home/claude/factory/run3/responses/01_happy_path.md
+- /home/claude/factory/run3/responses/10_happy_path_repeat.md
+- /home/claude/factory/run3/responses/11_happy_path_repeat2.md
 
-Составь таблицу сравнения построчно по чек-листу (10 строк × статус в 01/10/11 × совпадение) и таблицу по существу (реестр вопросов; миграция; конфликт 200/150; пометки missing_data / conflict_requires_review) и запиши инструментом Write в файл /home/claude/pulkovo/run3/verdicts/12_same_input_twice.md текст формата:
+Составь таблицу сравнения построчно по чек-листу (10 строк × статус в 01/10/11 × совпадение) и таблицу по существу (реестр вопросов; миграция; конфликт 200/150; пометки missing_data / conflict_requires_review) и запиши инструментом Write в файл /home/claude/factory/run3/verdicts/12_same_input_twice.md текст формата:
 
 Вердикт: PASS
 Причина: 2–5 предложений с конкретными расхождениями или их отсутствием и с числами (строк: N/N/N; совпадение статусов попарно: 01–10 X/10, 01–11 Y/10, 10–11 Z/10).

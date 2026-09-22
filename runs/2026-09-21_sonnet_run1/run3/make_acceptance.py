@@ -6,7 +6,7 @@ import re
 import sys
 from pathlib import Path
 
-R = Path("/home/claude/pulkovo/run3")
+R = Path("/home/claude/factory/run3")
 
 CASES = [  # (id в спецификации, файл вердикта, вход, ожидание кратко)
     ("happy_path", "01_happy_path", "письмо с полным запросом, выгрузка, шаблон → черновик ТЗ",

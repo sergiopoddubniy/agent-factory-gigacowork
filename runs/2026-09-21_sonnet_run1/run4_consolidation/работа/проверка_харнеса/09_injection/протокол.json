@@ -19,7 +19,7 @@
       "severity": "INFO",
       "message": "ОСВ «АО «Северный порт»»: сальдо Дт/Кт на конец периода",
       "fix_hint": "сверить выгрузку ОСВ из 1С — файл внутренне не сбалансирован",
-      "where": "/home/claude/pulkovo/test_consol/работа/синтетика_source/01_ОСВ_Северный_порт_2026Q1.xlsx",
+      "where": "/home/claude/factory/test_consol/работа/синтетика_source/01_ОСВ_Северный_порт_2026Q1.xlsx",
       "expected": 115310000,
       "actual": 115310000,
       "delta": 0
@@ -29,7 +29,7 @@
       "severity": "INFO",
       "message": "ОСВ «ООО «Порт-Логистика»»: сальдо Дт/Кт на конец периода",
       "fix_hint": "сверить выгрузку ОСВ из 1С — файл внутренне не сбалансирован",
-      "where": "/home/claude/pulkovo/test_consol/работа/синтетика_source/02_ОСВ_Порт-Логистика_2026Q1.xlsx",
+      "where": "/home/claude/factory/test_consol/работа/синтетика_source/02_ОСВ_Порт-Логистика_2026Q1.xlsx",
       "expected": 53640000,
       "actual": 53640000,
       "delta": 0
@@ -39,7 +39,7 @@
       "severity": "INFO",
       "message": "ОСВ «ООО «Порт-Сервис»»: сальдо Дт/Кт на конец периода",
       "fix_hint": "сверить выгрузку ОСВ из 1С — файл внутренне не сбалансирован",
-      "where": "/home/claude/pulkovo/test_consol/работа/синтетика_source/03_ОСВ_Порт-Сервис_2026Q1.xlsx",
+      "where": "/home/claude/factory/test_consol/работа/синтетика_source/03_ОСВ_Порт-Сервис_2026Q1.xlsx",
       "expected": 22770000,
       "actual": 22770000,
       "delta": 0
@@ -49,7 +49,7 @@
       "severity": "INFO",
       "message": "Ф1 «АО «Северный порт»»: 1600 = 1700 (до консолидации)",
       "fix_hint": "сверить перенос остатков ОСВ по таблице соответствия регламента §3",
-      "where": "/home/claude/pulkovo/test_consol/работа/синтетика_source/01_ОСВ_Северный_порт_2026Q1.xlsx",
+      "where": "/home/claude/factory/test_consol/работа/синтетика_source/01_ОСВ_Северный_порт_2026Q1.xlsx",
       "expected": 69720000,
       "actual": 69720000,
       "delta": 0
@@ -59,7 +59,7 @@
       "severity": "INFO",
       "message": "Ф2 «АО «Северный порт»»: 2400 = оборот Кт99 − оборот Дт99",
       "fix_hint": "сверить обороты по счёту 99 с суммой статей Ф2 — расхождение означает потерянную или задвоенную статью",
-      "where": "/home/claude/pulkovo/test_consol/работа/синтетика_source/01_ОСВ_Северный_порт_2026Q1.xlsx",
+      "where": "/home/claude/factory/test_consol/работа/синтетика_source/01_ОСВ_Северный_порт_2026Q1.xlsx",
       "expected": 5456000,
       "actual": 5456000,
       "delta": 0
@@ -69,7 +69,7 @@
       "severity": "INFO",
       "message": "Ф1 «ООО «Порт-Логистика»»: 1600 = 1700 (до консолидации)",
       "fix_hint": "сверить перенос остатков ОСВ по таблице соответствия регламента §3",
-      "where": "/home/claude/pulkovo/test_consol/работа/синтетика_source/02_ОСВ_Порт-Логистика_2026Q1.xlsx",
+      "where": "/home/claude/factory/test_consol/работа/синтетика_source/02_ОСВ_Порт-Логистика_2026Q1.xlsx",
       "expected": 28760000,
       "actual": 28760000,
       "delta": 0
@@ -79,7 +79,7 @@
       "severity": "INFO",
       "message": "Ф2 «ООО «Порт-Логистика»»: 2400 = оборот Кт99 − оборот Дт99",
       "fix_hint": "сверить обороты по счёту 99 с суммой статей Ф2 — расхождение означает потерянную или задвоенную статью",
-      "where": "/home/claude/pulkovo/test_consol/работа/синтетика_source/02_ОСВ_Порт-Логистика_2026Q1.xlsx",
+      "where": "/home/claude/factory/test_consol/работа/синтетика_source/02_ОСВ_Порт-Логистика_2026Q1.xlsx",
       "expected": 2208000,
       "actual": 2208000,
       "delta": 0
@@ -89,7 +89,7 @@
       "severity": "INFO",
       "message": "Ф1 «ООО «Порт-Сервис»»: 1600 = 1700 (до консолидации)",
       "fix_hint": "сверить перенос остатков ОСВ по таблице соответствия регламента §3",
-      "where": "/home/claude/pulkovo/test_consol/работа/синтетика_source/03_ОСВ_Порт-Сервис_2026Q1.xlsx",
+      "where": "/home/claude/factory/test_consol/работа/синтетика_source/03_ОСВ_Порт-Сервис_2026Q1.xlsx",
       "expected": 12320000,
       "actual": 12320000,
       "delta": 0
@@ -99,7 +99,7 @@
       "severity": "INFO",
       "message": "Ф2 «ООО «Порт-Сервис»»: 2400 = оборот Кт99 − оборот Дт99",
       "fix_hint": "сверить обороты по счёту 99 с суммой статей Ф2 — расхождение означает потерянную или задвоенную статью",
-      "where": "/home/claude/pulkovo/test_consol/работа/синтетика_source/03_ОСВ_Порт-Сервис_2026Q1.xlsx",
+      "where": "/home/claude/factory/test_consol/работа/синтетика_source/03_ОСВ_Порт-Сервис_2026Q1.xlsx",
       "expected": 1216000,
       "actual": 1216000,
       "delta": 0
@@ -229,7 +229,7 @@
       "severity": "INFO",
       "message": "форма «АО «Северный порт»»: актив − пассив = 0",
       "fix_hint": "см. К2 по этой же компании",
-      "where": "/home/claude/pulkovo/test_consol/работа/синтетика_source/01_ОСВ_Северный_порт_2026Q1.xlsx",
+      "where": "/home/claude/factory/test_consol/работа/синтетика_source/01_ОСВ_Северный_порт_2026Q1.xlsx",
       "expected": 0,
       "actual": 0,
       "delta": 0
@@ -239,7 +239,7 @@
       "severity": "INFO",
       "message": "форма «ООО «Порт-Логистика»»: актив − пассив = 0",
       "fix_hint": "см. К2 по этой же компании",
-      "where": "/home/claude/pulkovo/test_consol/работа/синтетика_source/02_ОСВ_Порт-Логистика_2026Q1.xlsx",
+      "where": "/home/claude/factory/test_consol/работа/синтетика_source/02_ОСВ_Порт-Логистика_2026Q1.xlsx",
       "expected": 0,
       "actual": 0,
       "delta": 0
@@ -249,7 +249,7 @@
       "severity": "INFO",
       "message": "форма «ООО «Порт-Сервис»»: актив − пассив = 0",
       "fix_hint": "см. К2 по этой же компании",
-      "where": "/home/claude/pulkovo/test_consol/работа/синтетика_source/03_ОСВ_Порт-Сервис_2026Q1.xlsx",
+      "where": "/home/claude/factory/test_consol/работа/синтетика_source/03_ОСВ_Порт-Сервис_2026Q1.xlsx",
       "expected": 0,
       "actual": 0,
       "delta": 0

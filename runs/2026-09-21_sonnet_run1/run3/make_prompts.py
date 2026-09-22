@@ -3,7 +3,7 @@
 Рамка агента — та же, что в прогоне 1, плюс упоминание первого прохода."""
 from pathlib import Path
 
-R = Path("/home/claude/pulkovo/run3")
+R = Path("/home/claude/factory/run3")
 M = R / "materials"
 (R / "prompts").mkdir(exist_ok=True)
 

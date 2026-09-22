@@ -29,7 +29,7 @@
       "severity": "INFO",
       "message": "ОСВ «АО «Северный порт»»: сальдо Дт/Кт на конец периода",
       "fix_hint": "сверить выгрузку ОСВ из 1С — файл внутренне не сбалансирован",
-      "where": "/home/claude/pulkovo/test_consol/клиент/03_Данные/2026Q2/ОСВ_Северный_порт_2026Q2.xlsx",
+      "where": "/home/claude/factory/test_consol/клиент/03_Данные/2026Q2/ОСВ_Северный_порт_2026Q2.xlsx",
       "expected": 157126000,
       "actual": 157126000,
       "delta": 0
@@ -39,7 +39,7 @@
       "severity": "INFO",
       "message": "ОСВ «ООО «Порт-Логистика»»: сальдо Дт/Кт на конец периода",
       "fix_hint": "сверить выгрузку ОСВ из 1С — файл внутренне не сбалансирован",
-      "where": "/home/claude/pulkovo/test_consol/клиент/03_Данные/2026Q2/ОСВ_Порт-Логистика_2026Q2.xlsx",
+      "where": "/home/claude/factory/test_consol/клиент/03_Данные/2026Q2/ОСВ_Порт-Логистика_2026Q2.xlsx",
       "expected": 76858000,
       "actual": 76858000,
       "delta": 0
@@ -49,7 +49,7 @@
       "severity": "INFO",
       "message": "ОСВ «ООО «Порт-Сервис»»: сальдо Дт/Кт на конец периода",
       "fix_hint": "сверить выгрузку ОСВ из 1С — файл внутренне не сбалансирован",
-      "where": "/home/claude/pulkovo/test_consol/клиент/03_Данные/2026Q2/ОСВ_Порт-Сервис_2026Q2.xlsx",
+      "where": "/home/claude/factory/test_consol/клиент/03_Данные/2026Q2/ОСВ_Порт-Сервис_2026Q2.xlsx",
       "expected": 32046000,
       "actual": 32046000,
       "delta": 0

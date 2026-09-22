@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  selftest:
+    name: selftest · python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12"]
+    defaults:
+      run:
+        working-directory: plugin/agent-factory
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Фабрика — selftest (98 проверок)
+        run: python3 scripts/selftest.py
+      - name: Исходный скилл — selftest_delivery (403 проверки)
+        run: python3 scripts/selftest_delivery.py
+      - name: Бюджет оркестратора (SKILL.md в норме; сумма справочников превышает порог по конструкции — читаются по ссылке)
+        run: |
+          python3 scripts/token_budget.py > budget.txt || true
+          cat budget.txt
+          grep -A2 '^SKILL.md' budget.txt | grep -q 'в норме'
+      - name: Ворота на примере
+        run: python3 scripts/spec_readiness.py --spec examples/1c-dev-assistant/AGENT_SPEC.md
+
+  mutations:
+    name: стенды мутаций
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugin/agent-factory
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: mutate_landed (иглы находок)
+        run: python3 scripts/mutate_landed.py
+      - name: mutate_build (порча сборщика)
+        run: python3 scripts/mutate_build.py
+      - name: mutate_budget (порча оркестратора)
+        run: python3 scripts/mutate_budget.py
+      - name: audit_findings
+        run: python3 scripts/audit_findings.py

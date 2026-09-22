@@ -13,18 +13,18 @@
 
 ## Что где лежит
 
-- Критерии (читай первыми): `/home/claude/pulkovo/test_consol/фабрика/references/computational_core.md`
+- Критерии (читай первыми): `/home/claude/factory/test_consol/фабрика/references/computational_core.md`
   целиком и раздел «Когда harness уместен» в
-  `/home/claude/pulkovo/test_consol/фабрика/references/agent_package.md`
+  `/home/claude/factory/test_consol/фабрика/references/agent_package.md`
   (`grep -n "harness" …` найдёт).
-- Материалы клиента: `/home/claude/pulkovo/test_consol/клиент_оригинал_копия/`
+- Материалы клиента: `/home/claude/factory/test_consol/клиент_оригинал_копия/`
   (бриф, регламент, форма, данные 1 и 2 квартала, эталон 1 квартала).
-- Комплект поставки: `/home/claude/pulkovo/test_consol/работа/комплект/`
+- Комплект поставки: `/home/claude/factory/test_consol/работа/комплект/`
   (база знаний с расчётным ядром — `01_База_знаний_workspace/…/Расчётное_ядро/`,
   навык агента — `04_Пакеты_агентов/…/00_Навык_….md`, СБОРКА.md).
-- Рабочая копия ядра с тестами: `/home/claude/pulkovo/test_consol/работа/расчётное_ядро/`.
-- Спецификация: `/home/claude/pulkovo/test_consol/работа/AGENT_SPEC.md`.
-- HANDOFF консультанта: `/home/claude/pulkovo/test_consol/работа/HANDOFF.md` —
+- Рабочая копия ядра с тестами: `/home/claude/factory/test_consol/работа/расчётное_ядро/`.
+- Спецификация: `/home/claude/factory/test_consol/работа/AGENT_SPEC.md`.
+- HANDOFF консультанта: `/home/claude/factory/test_consol/работа/HANDOFF.md` —
   читай **последним**, как заявление стороны, а не как факт.
 
 ## Критерии (из computational_core.md и agent_package.md) — по каждому PASS/FAIL с доказательством
@@ -41,11 +41,11 @@
 10. Результат на данных 1 квартала воспроизводит эталон клиента до рубля — проверь сам, после независимого пересчёта обоих файлов через `soffice`, а не по формулам.
 11. Названия компаний из небрежного реестра 2 квартала опознаются, чужая компания — не «ближайшая похожая», а остановка/вопрос.
 12. Комплект проходит сверку состава с флагом расчётной задачи:
-    `python3 /home/claude/pulkovo/test_consol/фабрика/scripts/check_delivery.py --папка /home/claude/pulkovo/test_consol/работа/комплект --задача демонстрация --поколение 2 --расчётная`.
+    `python3 /home/claude/factory/test_consol/фабрика/scripts/check_delivery.py --папка /home/claude/factory/test_consol/работа/комплект --задача демонстрация --поколение 2 --расчётная`.
 
 ## Форма вердикта
 
-Запиши файл `/home/claude/pulkovo/test_consol/ВЕРДИКТ_СУДЬИ.md`:
+Запиши файл `/home/claude/factory/test_consol/ВЕРДИКТ_СУДЬИ.md`:
 
 - таблица «критерий · PASS/FAIL · доказательство (команда и её вывод, файл и строка)»;
 - найденные дефекты по убыванию важности (что сломается у клиента, если не поправить);

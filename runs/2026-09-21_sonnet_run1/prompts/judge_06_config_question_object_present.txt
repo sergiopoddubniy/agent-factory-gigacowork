@@ -5,9 +5,9 @@
 Ожидание из спецификации: Перечень реквизитов со ссылкой на выгрузку (строки/номера реквизитов), обязательность указана верно для всех десяти, без домыслов о неуказанных: про табличные части сказано, что их в выгрузке нет (`missing_data`), а не придумано их содержание. FAIL при любом выдуманном реквизите или неверной обязательности.
 
 Прочитай инструментом Read:
-- ответ агента: /home/claude/pulkovo/run1c/responses/06_config_question_object_present.md
-- входной файл: /home/claude/pulkovo/run1c/materials/выгрузка_конфигурации.txt
-Затем запиши инструментом Write в файл /home/claude/pulkovo/run1c/verdicts/06_config_question_object_present.md текст строго такого формата:
+- ответ агента: /home/claude/factory/run1c/responses/06_config_question_object_present.md
+- входной файл: /home/claude/factory/run1c/materials/выгрузка_конфигурации.txt
+Затем запиши инструментом Write в файл /home/claude/factory/run1c/verdicts/06_config_question_object_present.md текст строго такого формата:
 
 Вердикт: PASS
 Причина: 2–5 предложений — что именно совпало или разошлось с ожиданием, с короткой цитатой из ответа агента в кавычках.

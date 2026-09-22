@@ -7,7 +7,7 @@
       "severity": "BLOCKING",
       "message": "компания «ООО «Порт-Логистика»» и «ООО «Порт-Логистика»» дают один и тот же код периметра PL",
       "fix_hint": "проверить, не загружена ли одна ОСВ дважды под разными файлами",
-      "where": "/home/claude/pulkovo/test_consol/работа/синтетика_source/02_ОСВ_Порт-Логистика_2026Q1.xlsx",
+      "where": "/home/claude/factory/test_consol/работа/синтетика_source/02_ОСВ_Порт-Логистика_2026Q1.xlsx",
       "expected": null,
       "actual": null,
       "delta": null
@@ -17,7 +17,7 @@
       "severity": "BLOCKING",
       "message": "не хватает ОСВ по компании(ям) периметра: ООО «Порт-Сервис»",
       "fix_hint": "загрузить недостающую ОСВ за этот квартал; без неё консолидация не выполняется",
-      "where": "/home/claude/pulkovo/test_consol/работа/синтетика_source/01_ОСВ_Северный_порт_2026Q1.xlsx; /home/claude/pulkovo/test_consol/работа/синтетика_source/02_ОСВ_Порт-Логистика_2026Q1.xlsx; /home/claude/pulkovo/test_consol/работа/синтетика_source/02_ОСВ_Порт-Логистика_2026Q1.xlsx",
+      "where": "/home/claude/factory/test_consol/работа/синтетика_source/01_ОСВ_Северный_порт_2026Q1.xlsx; /home/claude/factory/test_consol/работа/синтетика_source/02_ОСВ_Порт-Логистика_2026Q1.xlsx; /home/claude/factory/test_consol/работа/синтетика_source/02_ОСВ_Порт-Логистика_2026Q1.xlsx",
       "expected": null,
       "actual": null,
       "delta": null
