@@ -1,9 +1,9 @@
 # Пакет доказательств — demo-1c-dev-assistant
 
-Дата: 2026-09-21 · порог: **demo** · вердикт: **READY**
+Дата: 2026-09-24 · порог: **demo** · вердикт: **READY**
 
 ## Спецификация
-- id: `demo-1c-dev-assistant` · версия S6 · отпечаток `6ba73507`
+- id: `demo-1c-dev-assistant` · версия S8 · отпечаток `e603b8ee`
 - класс применимости: ии-нативный · контур: demo · доступ: L0
 
 ## Ворота достаточности
@@ -11,7 +11,7 @@
 - pilot: FAIL (Ф-03-БЕЙЗЛАЙН, Ф-13-ОРАКУЛ)
 
 ## Пакет
-- путь: `/mnt/user-data/outputs/agent-factory-gigacowork/plugin/agent-factory/examples/1c-dev-assistant/комплект_загрузка/demo-1c-dev-assistant` · отпечаток `ff3b0c6a`
+- путь: `/mnt/user-data/outputs/agent-factory-gigacowork/plugin/agent-factory/examples/1c-dev-assistant/комплект_загрузка/demo-1c-dev-assistant` · отпечаток `7e8612d8`
 - аудит: PASS
 
 ## Приёмочный прогон

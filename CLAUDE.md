@@ -22,8 +22,8 @@ https://github.com/sergiopoddubniy/agent-factory-gigacowork — всё, что �
 
 ## Перед сохранением любой правки
 
-1. `python3 plugin/agent-factory/scripts/selftest.py` — код 0 (98 проверок);
-   `python3 plugin/agent-factory/scripts/selftest_delivery.py` — 403/403.
+1. `python3 plugin/agent-factory/scripts/selftest.py` — код 0 (105 проверок);
+   `python3 plugin/agent-factory/scripts/selftest_delivery.py` — 409/409.
    После правки справочников — `scripts/mutate_landed.py` (иглы находок),
    после правки сборщика — `scripts/mutate_build.py`, после правки
    оркестратора — `scripts/mutate_budget.py` (4/4).

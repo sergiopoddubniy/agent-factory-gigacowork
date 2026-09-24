@@ -35,6 +35,7 @@ from factory_common import (  # noqa: E402
     BLOCKS, EXIT_INPUT, EXIT_OK, EXIT_RED, HYPOTHESIS_FIELDS, REQUIRED_CASES,
     STATUS_ASSUMED, STATUS_FILLED, STATUS_MISSING, Spec, case_ids, checklist,
     checklist_items, ears_lines, hitl_rows, io_lists, nfc, parse_spec, rules, scope_lists,
+    EXECUTORS, boundary_rows, core_kind, steps,
 )
 
 # Блоки, которые для детерминированного класса не требуются ни на одном
@@ -180,6 +181,53 @@ def check(spec: Spec, threshold: str) -> dict:
         if pilot and rows and any(("?" in r[1]) or not r[1].strip() for r in rows):
             findings.append(_f("Ф-10-КТО", 10, "в HITL-карте не назван валидатор",
                                "колонка «Кто» — роль, а не знак вопроса"))
+
+    # --- Блок 8: граница код/модель — таблица по шагам ---------------------
+    # Решение о детерминированном слое принимается по шагам, а не по агенту
+    # (v9.11 исходного скилла): «шаг → исполнитель → инвариант → чем
+    # проверяется». Без таблицы «ядра не будет» неотличимо от «не думали».
+    b8 = spec.block(8)
+    rows = boundary_rows(b8) if b8.status != STATUS_MISSING else []
+    if b8.status != STATUS_MISSING:
+        if not rows:
+            findings.append(_f("Ф-08-ГРАНИЦА", 8, "нет таблицы «Граница код/модель:»",
+                               "по строке на каждый шаг из «Шаги:»: `<шаг> — код|модель|человек — "
+                               "<инвариант или нет> — <чем проверяется>` (agent_package.md, «Тест на "
+                               "исполнителя»)"))
+        else:
+            bad = [r["step"][:40] for r in rows if not r["complete"] or not any(e in r["executor"] for e in EXECUTORS)]
+            if bad:
+                findings.append(_f("Ф-08-ГРАНИЦА", 8, "строки таблицы неполны или без исполнителя: " + "; ".join(bad[:3]),
+                                   "четыре части через « — »; исполнитель — код, модель или человек"))
+            n_steps = len(steps(b8))
+            if n_steps and len(rows) < n_steps:
+                findings.append(_f("Ф-08-ГРАНИЦА", 8, f"шагов {n_steps}, строк таблицы {len(rows)}",
+                                   "решение принимается по каждому шагу — строка на шаг"))
+
+    # --- Блок 6: решение о ядре записано явно ---------------------------------
+    # Повод: агент реестра закупок — «ядра не будет» решили по критерию
+    # «только арифметика» и нигде не записали; задачу решил скрипт.
+    b6 = spec.block(6)
+    if b6.status != STATUS_MISSING:
+        core = core_kind(b6)
+        if not core["kind"]:
+            findings.append(_f("Ф-06-ЯДРО", 6, "нет строки «Ядро:» — решение о расчётном/извлекающем ядре не записано",
+                               "пройди тест на парсер (agent_package.md, «Когда harness уместен») и запиши "
+                               "«Ядро: нет — причина: …», «Ядро: расчётное» или «Ядро: извлекающее»"))
+        elif core["kind"] == "?":
+            findings.append(_f("Ф-06-ЯДРО", 6, f"строка «Ядро:» не разобрана: «{core['raw'][:60]}»",
+                               "допустимо: «нет — причина: …», «расчётное», «извлекающее»"))
+        elif core["kind"] == "нет" and not core["reason"]:
+            findings.append(_f("Ф-06-ЯДРО", 6, "«Ядро: нет» без причины",
+                               "назови причину словом «причина:» — какой инвариант искали и почему его нет "
+                               "(шесть видов, agent_package.md) или чем исполнять нечем"))
+        elif core["kind"] == "нет" and any(r["code"] for r in rows):
+            findings.append(_f("Ф-06-ЯДРО", 6, "«Ядро: нет», а в таблице «Граница код/модель:» шаг отдан коду: "
+                               + "; ".join(r["step"][:40] for r in rows if r["code"])[:160],
+                               "либо ядро есть (расчётное / извлекающее), либо шаг возвращается модели с причиной"))
+        elif core["kind"] in ("расчётное", "извлекающее") and rows and not any(r["code"] for r in rows):
+            findings.append(_f("Ф-06-ЯДРО", 6, f"«Ядро: {core['kind']}», но ни один шаг таблицы не отдан коду",
+                               "назови шаги ядра исполнителем «код» в «Граница код/модель:»"))
 
     # --- Блок 11: коннекторы названы подмаркером, а не только словами ------
     # Прогон на агенте консолидации (run4): блок 11 описывал подтверждённый

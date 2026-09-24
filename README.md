@@ -23,8 +23,8 @@
 > a 15-block agent spec as the source of truth, machine-checked readiness
 > gates (demo / pilot), a consulting plan derived from gate findings, a
 > delivery kit generated from the spec against a canonical composition, an
-> acceptance run, and an outcome check. Pure Python (stdlib only), 39
-> reference docs, 29 scripts, 98 + 403 self-checks, mutation stands. The
+> acceptance run, and an outcome check. Pure Python (stdlib only), 40
+> reference docs, 29 scripts, 105 + 409 self-checks, mutation stands. The
 > project is in Russian; the reference docs are the product. Start with
 > `docs/00_Концепция.md` and `docs/01_Архитектура.md`.
 
@@ -70,8 +70,8 @@
 git clone https://github.com/sergiopoddubniy/agent-factory-gigacowork.git
 cd agent-factory-gigacowork/plugin/agent-factory
 
-python3 scripts/selftest.py             # 98 проверок фабрики, код 0
-python3 scripts/selftest_delivery.py    # 403 проверки исходного скилла, код 0
+python3 scripts/selftest.py             # 105 проверок фабрики, код 0
+python3 scripts/selftest_delivery.py    # 409 проверок исходного скилла, код 0
 
 E=examples/1c-dev-assistant
 python3 scripts/spec_readiness.py --spec $E/AGENT_SPEC.md                    # demo: PASS
@@ -108,7 +108,7 @@ python3 scripts/build_delivery.py --spec $E/AGENT_SPEC.md --out /tmp/поста�
 plugin/agent-factory/       то, что уходит на платформу
   SKILL.md                  оркестратор: правила, режимы, задачи, маршрут (~5 тыс. токенов)
   commands/                 9 команд
-  references/               39 справочников; pipelines/ — стадии трёх режимов
+  references/               40 справочников; pipelines/ — стадии трёх режимов
   templates/                шаблон спецификации, шаблон приёмочного прогона
   scripts/                  29 скриптов, stdlib, Python 3.10+
   examples/1c-dev-assistant/  спецификация, материалы, комплект поставки, прогон
@@ -146,7 +146,7 @@ CLAUDE.md                   процедура проверки для аген�
 
 ## Откуда это
 
-Фабрика выросла из скилла `gigacowork-agent-scenario` (v9.10), выверенного
+Фабрика выросла из скилла `gigacowork-agent-scenario` (v9.11), выверенного
 на живых пилотах: три режима, целевой состав поставки, 30 справочников и
 20 скриптов, каждый — ответ на конкретный сбой. В фабрике он лежит целиком
 (`docs/05_Сверка_с_исходным_скиллом.md`), а поверх добавлены спецификация
@@ -160,7 +160,7 @@ Spec-Driven Development и AI-DISRUPT PDLC.
 
 ## Статус и открытые вопросы
 
-V3.1 · 2026-09-22. Работает как плагин для агента, умеющего читать
+V3.2 · 2026-09-24. Работает как плагин для агента, умеющего читать
 `SKILL.md` и запускать Python. Официальной спецификации плагинов
 GigaCowork у проекта нет — раскладка, формат команд и способ доставки на
 инстанс записаны как вопросы к платформе в

@@ -436,6 +436,52 @@ def kb_files(block: Block) -> list:
     return out
 
 
+CORE_KINDS = ("нет", "расчётное", "извлекающее")
+EXECUTORS = ("код", "модель", "человек")
+
+
+def boundary_rows(block: Block) -> list:
+    """Таблица «шаг → исполнитель → инвариант → чем проверяется» — блок 8,
+    подмаркер «Граница код/модель:». Строка: `<шаг> — <исполнитель> —
+    <инвариант или нет> — <чем проверяется>`; исполнитель — код / модель /
+    человек (допустимо «код+модель»). Решение о детерминированном слое
+    принимается по шагам, а не по агенту (agent_package.md, «Тест на
+    исполнителя»)."""
+    out = []
+    for ln in block.subsection("Граница код/модель"):
+        parts = [x.strip() for x in re.split(r"\s+[—–]\s+", ln)]
+        if not parts or not parts[0]:
+            continue
+        ex = nfc(parts[1]).lower() if len(parts) > 1 else ""
+        out.append({"step": parts[0], "executor": ex,
+                    "invariant": parts[2] if len(parts) > 2 else "",
+                    "check": parts[3] if len(parts) > 3 else "",
+                    "code": "код" in ex, "complete": len(parts) >= 4})
+    return out
+
+
+def core_kind(block: Block) -> dict:
+    """Решение о ядре агента — блок 6, строка «Ядро:». Значения:
+    `нет — причина: <…>` (инварианта нет либо исполнять нечем),
+    `расчётное` (арифметический инвариант: консолидация, сверка, начисления),
+    `извлекающее` (адресный инвариант и полнота: парсер источника со
+    стабильной структурой). Возвращает {"kind": ..., "reason": ..., "raw": ...};
+    kind == "" — строки нет. Повод: агент реестра закупок собрали как
+    «модель читает страницу», хотя задачу решал скрипт — критерий читался
+    как «только арифметика», а решение «ядра не будет» нигде не стояло явно."""
+    lines = block.subsection("Ядро")
+    if not lines:
+        return {"kind": "", "reason": "", "raw": ""}
+    raw = " ".join(lines).strip()
+    low = nfc(raw).lower().replace("расчетное", "расчётное")
+    kind = next((k for k in CORE_KINDS if low.startswith(k)), "?")
+    reason = ""
+    m = re.search(r"причина\s*:\s*(.+)$", raw, re.I)
+    if m:
+        reason = m.group(1).strip()
+    return {"kind": kind, "reason": reason, "raw": raw}
+
+
 def workspace_skills(block: Block) -> list:
     """Навыки пространства (коннекторы и общие навыки), от которых зависит
     агент — блок 11, подмаркер «Навыки пространства:». Пункт: `<имя навыка>

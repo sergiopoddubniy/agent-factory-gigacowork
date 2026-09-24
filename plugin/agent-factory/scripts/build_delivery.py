@@ -58,7 +58,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from factory_common import (  # noqa: E402
     EXIT_INPUT, EXIT_OK, EXIT_RED, REQUIRED_CASES, Spec, cases, checklist_items, commands_list,
     connectors, ears_lines, hitl_rows, io_lists, kb_files, parse_spec, rules, scope_lists,
-    workspace_skills,
+    workspace_skills, core_kind,
 )
 from build_agent_package import ZIP_TIMESTAMP, all_commands, render_command, render_skill, write_zip  # noqa: E402
 from spec_readiness import check as readiness_check, render as render_readiness  # noqa: E402
@@ -323,7 +323,7 @@ def render_assembly(spec: Spec, num: int, slug_dir: str, kb_dir: str, gen: str, 
                      + (f"; минимальная версия коннектора {c['version']}." if c["version"] else "."))
         step += 1
     if calc:
-        lines.append(f"{step}. **Разместить расчётное ядро там, откуда его запускает коннектор исполнения "
+        lines.append(f"{step}. **Разместить ядро агента (расчётное или извлекающее) там, откуда его запускает коннектор исполнения "
                      "кода** (папки `harness/`, `rules/` из базы знаний): как файлы базы знаний попадают в "
                      "песочницу — подтвердить у администратора платформы, а не предполагать; затем от лица "
                      "агента запустить точку входа ядра на пустом шаблоне и убедиться, что код возврата и "
@@ -835,7 +835,10 @@ def main(argv=None) -> int:
 
     root, num, slug, today = Path(args.out).resolve(), args.num, spec.slug, args.date
     name = spec.fm("имя агента")
-    calc = bool(args.calc) or (spec.fm("расчётная") or spec.fm("расчетная") or "").strip().lower() in ("да", "yes", "true")
+    core = core_kind(spec.block(6))
+    calc = (bool(args.calc) or (spec.fm("расчётная") or spec.fm("расчетная") or "").strip().lower() in ("да", "yes", "true")
+            or core["kind"] == "расчётное")
+    has_core = calc or core["kind"] == "извлекающее"
     root.mkdir(parents=True, exist_ok=True)
     slug_dir = f"{num}_{slug}_{args.version}_{_d(today)}"
     kb_dir, synth_dir = f"{num}_{slug}", f"{num}_{slug}"
@@ -941,7 +944,7 @@ def main(argv=None) -> int:
     (root / "00_Карта_джоб.md").write_text(render_job_map(spec, num, slug_dir), encoding="utf-8")
     (root / "00_ПЕРЕИСПОЛЬЗОВАНИЕ.md").write_text(render_reuse(spec), encoding="utf-8")
     (root / "00_Инструкция_по_сборке_пространства.md").write_text(
-        render_assembly(spec, num, slug_dir, kb_dir, args.gen, ws, conns, cmds, args.task, calc), encoding="utf-8")
+        render_assembly(spec, num, slug_dir, kb_dir, args.gen, ws, conns, cmds, args.task, has_core), encoding="utf-8")
     (root / "00_Как_использовать_этот_комплект.md").write_text(
         render_entry_point(spec, num, slug_dir, kb_dir, synth_dir if synth_names or synth.exists() else None,
                            args.task, cmds, extras), encoding="utf-8")
@@ -999,7 +1002,8 @@ def main(argv=None) -> int:
                      + ", ".join(kb_missing) + " — передайте папку через --kb; комплект без базы знаний — заготовка")
     log = [f"# Сборка комплекта — {name}", "",
            f"- Дата: {today}", f"- Версия агента: {args.version} · номер {num} · задача: {args.task} · поколение {args.gen}"
-           + (" · расчётная (Я10: пустой шаблон .xlsx в базе знаний)" if calc else ""),
+           + (" · расчётная (Я10: пустой шаблон .xlsx в базе знаний)" if calc else "")
+           + (f" · ядро: {core['kind']}" + (f" — {core['reason']}" if core["reason"] else "") if core["kind"] else ""),
            f"- Спецификация: {slug} · {spec.fm('версия спецификации')} · отпечаток {spec.fp}",
            f"- Ворота demo: {gate['verdict']} · pilot: {gate_p['verdict']}",
            f"- delivery composition check: {dc_line}",

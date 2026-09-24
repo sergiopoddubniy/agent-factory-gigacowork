@@ -178,7 +178,7 @@ def main() -> int:
               all((kit / f).is_file() for f in ("AGENT_SPEC.md", "00_ПЕРЕИСПОЛЬЗОВАНИЕ.md", "СБОРКА.md",
                                                  "demo-1c-dev-assistant.zip")))
         skill_text = (pkg / "skills/00-agent-skill/SKILL.md").read_text(encoding="utf-8")
-        check("сборка: отпечаток спецификации во фронтматтере", "спецификация: demo-1c-dev-assistant · S6 ·" in skill_text)
+        check("сборка: отпечаток спецификации во фронтматтере", "спецификация: demo-1c-dev-assistant · S8 ·" in skill_text)
         check("сборка: 17 разделов", len(re.findall(r"^## \d+\. ", skill_text, re.M)) == 17)
         check("сборка: чек-лист полноты порождён — таблица из 10 строк, строка сверки, гейт completeness_check, модуль 0",
               "Чек-лист: 10 пунктов" in skill_text and "`completeness_check`" in skill_text
@@ -200,6 +200,12 @@ def main() -> int:
                                       "6. При коде 2 остановиться → СТОП пользователю\n"
                                       "7. При коде 0 прогнать quality gates → ответ по формату §17")
         assert "6. При коде 2" in conn_spec
+        conn_spec = conn_spec.replace("- Прогнать quality gates — модель — нет — таблица чек-листа ровно из 10 строк",
+                                      "- Прогнать quality gates — модель — нет — таблица чек-листа ровно из 10 строк\n"
+                                      "- Вызвать коннектор — код — соответствия источнику — код возврата и протокол\n"
+                                      "- При коде 2 остановиться — модель — нет — СТОП процитирован целиком\n"
+                                      "- При коде 0 прогнать quality gates — модель — нет — таблица чек-листа")
+        conn_spec = conn_spec.replace("Ядро: нет — причина:", "Ядро: извлекающее\nБыло: нет — причина:")
         r = run("build_agent_package.py", "--spec", str(write(tmp / "conn.md", conn_spec)), "--out", str(tmp / "kit_conn"), "--date", "2026-09-21")
         conn_cmd = (tmp / "kit_conn/demo-1c-dev-assistant/commands/run-agent.md").read_text(encoding="utf-8")
         conn_skill = (tmp / "kit_conn/demo-1c-dev-assistant/skills/00-agent-skill/SKILL.md").read_text(encoding="utf-8")
@@ -211,6 +217,32 @@ def main() -> int:
               and "**Модуль 7 (ветвь).** При коде 0 прогнать quality gates." in conn_skill
               and conn_skill.count("- вход: выход модуля 5 (код возврата 0 или 2)") == 2
               and "выход модуля 6" not in conn_skill)
+        # --- run5 (агент реестра закупок): решение о ядре записывается явно ---
+        no_core = base.replace("Ядро: нет — причина:", "Ядро-удалено:")
+        assert no_core != base
+        r = run("spec_readiness.py", "--spec", str(write(tmp / "nocore.md", no_core)))
+        check("ворота: нет строки «Ядро:» → Ф-06-ЯДРО, FAIL", r.returncode == 1 and "Ф-06-ЯДРО" in r.stdout, r.stdout[-300:])
+        bare_core = base.replace("Ядро: нет — причина:", "Ядро: нет —")
+        r = run("spec_readiness.py", "--spec", str(write(tmp / "barecore.md", bare_core)))
+        check("ворота: «Ядро: нет» без причины → Ф-06-ЯДРО", r.returncode == 1 and "без причины" in r.stdout, r.stdout[-300:])
+        extr = base.replace("Ядро: нет — причина:", "Ядро: извлекающее\nБыло: нет — причина:")
+        extr = extr.replace("- Сопоставить требования с объектами выгрузки — модель —", "- Сопоставить требования с объектами выгрузки — код —")
+        r = run("spec_readiness.py", "--spec", str(write(tmp / "extr.md", extr)))
+        check("ворота: «Ядро: извлекающее» проходит", r.returncode == 0, r.stdout[-300:])
+        no_tbl = base.replace("Граница код/модель:", "Граница-удалена:")
+        assert no_tbl != base
+        r = run("spec_readiness.py", "--spec", str(write(tmp / "notbl.md", no_tbl)))
+        check("ворота: нет таблицы «Граница код/модель:» → Ф-08-ГРАНИЦА", r.returncode == 1 and "Ф-08-ГРАНИЦА" in r.stdout, r.stdout[-300:])
+        code_row = base.replace("- Сопоставить требования с объектами выгрузки — модель —", "- Сопоставить требования с объектами выгрузки — код —")
+        assert code_row != base
+        r = run("spec_readiness.py", "--spec", str(write(tmp / "coderow.md", code_row)))
+        check("ворота: шаг отдан коду при «Ядро: нет» → Ф-06-ЯДРО (противоречие таблице)",
+              r.returncode == 1 and "шаг отдан коду" in r.stdout, r.stdout[-300:])
+        r = run("build_agent_package.py", "--spec", str(spec), "--out", str(tmp / "kit_tbl"), "--date", "2026-09-21")
+        tbl_skill = (tmp / "kit_tbl/demo-1c-dev-assistant/skills/00-agent-skill/SKILL.md").read_text(encoding="utf-8")
+        check("сборка: таблица «шаг → исполнитель → инвариант → чем проверяется» перенесена в §6 навыка",
+              r.returncode == 0 and "| Шаг | Исполнитель | Инвариант | Чем проверяется |" in tbl_skill
+              and tbl_skill.count("| модель |") == 5 and "ядро: нет — " in tbl_skill)
         no_marker = base.replace("Коннекторы: нет\n", "")
         r = run("spec_readiness.py", "--spec", str(write(tmp / "nomarker.md", no_marker)))
         check("ворота: коннектор упомянут словами без строки «Коннекторы:» → Ф-11-КОННЕКТОР, FAIL",
@@ -332,6 +364,15 @@ def main() -> int:
                 "--synthetic", str(mats / "синтетика"))
         check("поставка: без ответов прогона — заготовка запасного результата названа в СБОРКА.md предупреждением Д3",
               r.returncode == 0 and "[WARN] Д3 запасной результат — заготовка" in (tmp / "поставка_noresp/СБОРКА.md").read_text(encoding="utf-8"))
+        r = run("build_delivery.py", "--spec", str(tmp / "extr.md"), "--out", str(tmp / "поставка_extr"), "--задача", "демонстрация",
+                "--version", "V1", "--client", "Тест", "--date", "2026-09-21", "--kb", str(mats / "база_знаний"),
+                "--synthetic", str(mats / "синтетика"))
+        check("поставка: «Ядро: извлекающее» → шаг сборки про размещение ядра в песочнице и строка «ядро:» в СБОРКА.md",
+              r.returncode == 0
+              and "Разместить ядро агента" in (tmp / "поставка_extr/00_Инструкция_по_сборке_пространства.md").read_text(encoding="utf-8")
+              and "ядро: извлекающее" in (tmp / "поставка_extr/СБОРКА.md").read_text(encoding="utf-8")
+              and "Разместить ядро агента" not in (dl / "00_Инструкция_по_сборке_пространства.md").read_text(encoding="utf-8"),
+              r.stdout[-400:])
         check("поставка: точка входа, инструкция по сборке, карта джоб, след переиспользования",
               all((dl / f).is_file() for f in ("00_Как_использовать_этот_комплект.md",
                                                "00_Инструкция_по_сборке_пространства.md",

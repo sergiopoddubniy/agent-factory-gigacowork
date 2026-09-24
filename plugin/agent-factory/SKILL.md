@@ -17,8 +17,8 @@ id: agent-factory
   фабрика делает агентов, не программы; если нужен только расчёт
   финансового эффекта — это скилл `feo-ai-methodology`.
 категория: Фабрика агентов
-версия агента: V3.1
-обновлено: 2026-09-21
+версия агента: V3.2
+обновлено: 2026-09-24
 version: 1.0.0
 ---
 
@@ -110,6 +110,10 @@ version: 1.0.0
   неопределённость задания (единица результата, порядок, правило спорного
   случая) и длина сессии — второе лечится разбиением, а не девятым правилом
   (`references/output_stability.md`).
+- **Разделение труда между кодом и моделью — по шагам, а не по агенту**:
+  шаг, воспроизводимый кодом, модели не поручается. Таблица «шаг →
+  исполнитель → инвариант → чем проверяется» в блоке 8, итог — `Ядро:` в
+  блоке 6; отказ — с причиной (`references/agent_package.md`).
 - **Числовые параметры клиента применяются без изменений**; своё значение —
   только когда клиентского нет, помечается гипотезой
   (`references/computational_core.md`).
@@ -200,7 +204,7 @@ version: 1.0.0
 | `hitl_and_access.md`, `agentization_level.md`, `behaviour_patterns.md`, `few_shot_patterns.md`, `first_run_setup.md` | архитектура: HITL, уровни L0–L3, уровень агентизации, паттерны отказов, few-shot, самонастройка |
 | `context_quality.md`, `hypothesis_testing.md`, `eval_harness.md`, `evals_and_acceptance.md`, `deployed_agent_evals.md` | проверки: контекст до прогона, гипотезы, измеритель, приёмка, развёрнутый агент |
 | `scenario_template.md`, `design_system.md` | клиентский docx |
-| `demonstration_mode.md`, `product_experience.md`, `staged_execution.md`, `computational_core.md`, `solution_blueprint.md` | демонстрация; агент как продукт; длинная работа; расчётные сценарии; карта решения |
+| `demonstration_mode.md`, `product_experience.md`, `staged_execution.md`, `computational_core.md`, `extraction_core.md`, `solution_blueprint.md` | демонстрация; агент как продукт; длинная работа; расчётные сценарии; карта решения |
 | `workspace_assembly.md`, `portfolio_intake.md`, `portfolio_audit.md`, `master_scenario_template.md` | портфель |
 | `pilot_governance.md`, `pilot_acceptance_protocol.md`, `improvement_loop.md` | пилот |
 | `agent_templates.md` + `agent_templates/`, `knowledge/` | база шаблонов и реестр реализованных агентов |

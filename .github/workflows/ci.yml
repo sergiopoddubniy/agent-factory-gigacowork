@@ -21,9 +21,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Фабрика — selftest (98 проверок)
+      - name: Фабрика — selftest (105 проверок)
         run: python3 scripts/selftest.py
-      - name: Исходный скилл — selftest_delivery (403 проверки)
+      - name: Исходный скилл — selftest_delivery (409 проверок)
         run: python3 scripts/selftest_delivery.py
       - name: Бюджет оркестратора (SKILL.md в норме; сумма справочников превышает порог по конструкции — читаются по ссылке)
         run: |

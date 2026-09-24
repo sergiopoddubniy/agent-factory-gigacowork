@@ -1,17 +1,17 @@
 {
-  "date": "2026-09-21",
+  "date": "2026-09-24",
   "threshold": "demo",
   "spec": {
     "id": "demo-1c-dev-assistant",
-    "version": "S6",
-    "fingerprint": "6ba73507",
+    "version": "S8",
+    "fingerprint": "e603b8ee",
     "class": "ии-нативный",
     "contour": "demo",
     "access": "L0"
   },
   "package": {
     "path": "/mnt/user-data/outputs/agent-factory-gigacowork/plugin/agent-factory/examples/1c-dev-assistant/комплект_загрузка/demo-1c-dev-assistant",
-    "fingerprint": "ff3b0c6a"
+    "fingerprint": "7e8612d8"
   },
   "readiness": {
     "demo": "PASS",

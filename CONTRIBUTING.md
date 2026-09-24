@@ -10,9 +10,9 @@
 Из `plugin/agent-factory/`:
 
 ```bash
-python3 scripts/selftest.py             # фабрика: 98 проверок, код 0
-python3 scripts/selftest_delivery.py    # исходный скилл: 403/403
-python3 scripts/mutate_landed.py        # иглы находок вырезаются и ловятся: 112/112
+python3 scripts/selftest.py             # фабрика: 105 проверок, код 0
+python3 scripts/selftest_delivery.py    # исходный скилл: 409/409
+python3 scripts/mutate_landed.py        # иглы находок вырезаются и ловятся: 118/118
 python3 scripts/mutate_build.py         # порча сборщика ловится: 6/6
 python3 scripts/mutate_budget.py        # порча оркестратора ловится: 4/4
 python3 scripts/token_budget.py         # SKILL.md в норме: ≤ 5000 токенов, ≤ 500 строк (код 1 из-за суммы справочников — ожидаемо)
