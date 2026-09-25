@@ -22,8 +22,8 @@ https://github.com/sergiopoddubniy/agent-factory-gigacowork — всё, что �
 
 ## Перед сохранением любой правки
 
-1. `python3 plugin/agent-factory/scripts/selftest.py` — код 0 (105 проверок);
-   `python3 plugin/agent-factory/scripts/selftest_delivery.py` — 409/409.
+1. `python3 plugin/agent-factory/scripts/selftest.py` — код 0 (118 проверок);
+   `python3 plugin/agent-factory/scripts/selftest_delivery.py` — 411/411.
    После правки справочников — `scripts/mutate_landed.py` (иглы находок),
    после правки сборщика — `scripts/mutate_build.py`, после правки
    оркестратора — `scripts/mutate_budget.py` (4/4).
@@ -33,6 +33,17 @@ https://github.com/sergiopoddubniy/agent-factory-gigacowork — всё, что �
 3. Запись в `ЖУРНАЛ_ВЕРСИЙ.md`: версия, дата, что изменилось, зачем.
 4. Версия во фронтматтере `SKILL.md` (`версия агента: V<N>`, `обновлено:`)
    и в шапках команд — совпадают с журналом.
+
+## Витрина и обезличивание
+
+- Витринная сборка для платформы — только `scripts/build_hub.py` (без
+  референсов, с вырезанным провенансом); руками архив не собирается.
+- Перед коммитом — `scripts/hub_gate.py --папка plugin/agent-factory --мягко`
+  (класс A: 0 нарушений). Приватный стоп-лист реальных названий в
+  репозиторий не кладётся.
+- Новые уроки пишутся по `docs/06_Политика_обезличивания.md`: правило
+  отдельно, повод — фразой «Повод: …», суммы относительные, домены
+  `example-*.ru`.
 
 ## Запреты
 

@@ -265,7 +265,57 @@ def main() -> int:
         r = run("build_agent_package.py", "--spec", str(tmp / "нет.md"), "--out", str(tmp / "kit_none"))
         check("сборка: нет файла → код 2", r.returncode == 2)
 
-        # --- 5. Аудит пакета ----------------------------------------------------
+        # --- 4г. Публикация: шлюз запретов и витринная сборка ------------------
+        r = run("hub_gate.py", "--папка", str(HERE.parent), "--мягко")
+        check("шлюз: репозиторий чист по классу A (мягкий режим, 0 нарушений)", r.returncode == 0, r.stdout[-400:])
+        leak = tmp / "leak"
+        leak.mkdir()
+        # Фикстура собирается из кусков, чтобы сам selftest.py не срабатывал на шлюзе.
+        write(leak / "урок.md", "Повод: боевой прогон у ООО «" + "Реальная Компания» 13.09" + ".2026, "
+              + "Иван " + "Петрович подтвердил, сайт real" + "client" + ".ru")
+        r = run("hub_gate.py", "--папка", str(leak), "--строго")
+        check("шлюз: орг-форма, ФИО, домен и дата ловятся строгим режимом",
+              r.returncode == 1 and all(k in r.stdout for k in ("[ОРГ-ФОРМА]", "[ФИО]", "[ДОМЕН]", "[ДАТА]")), r.stdout[-400:])
+        r = run("hub_gate.py", "--папка", str(leak), "--мягко")
+        check("шлюз: мягкий режим ловит класс A и пропускает даты",
+              r.returncode == 1 and "[ДАТА]" not in r.stdout and "[ОРГ-ФОРМА]" in r.stdout, r.stdout[-400:])
+        r = run("hub_gate.py", "--папка", str(tmp / "нет_папки"), "--строго")
+        check("шлюз: нет папки → код 2", r.returncode == 2)
+        hub_out = tmp / "hub_out"
+        r = run("build_hub.py", "--out", str(hub_out), "--no-check", "--version", "V0", "--date", "2026-09-21")
+        hub = hub_out / "hub" / "agent-factory"
+        check("витрина: раскладка плагина — plugin.yaml, agents/, commands/, skills/agent-factory/SKILL.md, agent.html, README.md",
+              r.returncode == 0 and all((hub / f).exists() for f in ("plugin.yaml", "agents/agent-factory.md", "commands/new-agent.md",
+                                                                      "skills/agent-factory/SKILL.md", "agent.html", "README.md")), r.stdout[-400:])
+        r = run("hub_gate.py", "--папка", str(hub), "--строго")
+        check("витрина: строгий шлюз — 0 нарушений (даты и адреса платформы вырезаны)", r.returncode == 0, r.stdout[-600:])
+        hub_pkg = (hub / "skills/agent-factory/references/agent_package.md").read_text(encoding="utf-8")
+        check("витрина: правила сохранены, провенанс вырезан",
+              "Шесть видов инварианта" in hub_pkg and ("28.08" + ".2026") not in hub_pkg and ("27.08" + ".2026") not in hub_pkg)
+        hub_st = (hub / "skills/agent-factory/scripts/selftest_delivery.py").read_text(encoding="utf-8")
+        check("витрина: фикстуры в коде не тронуты (строки со строковыми литералами)", '2_демо_V3_13.09.26' in hub_st)
+        import zipfile
+        zp = hub_out / "agent-factory_hub_V0.zip"
+        with zipfile.ZipFile(zp) as z:
+            names = z.namelist()
+            utf8 = all((zi.flag_bits & 0x800) for zi in z.infolist() if any(ord(c) > 127 for c in zi.filename))
+        check("витрина: архив с кириллическими именами в UTF-8, без #U-искажений",
+              zp.is_file() and utf8 and any("ПРИЁМОЧНЫЙ_ПРОГОН" in n for n in names) and not any("#U" in n for n in names))
+        check("витрина: референсов нет — ни examples/, ни шаблонов в базе; индекс базы пересобран на ноль",
+              not (hub / "skills/agent-factory/examples").exists()
+              and not any(p.is_dir() for p in (hub / "skills/agent-factory/references/agent_templates").iterdir())
+              and "Шаблонов: **0**" in (hub / "skills/agent-factory/references/agent_templates/ИНДЕКС.md").read_text(encoding="utf-8")
+              and "examples/1c-dev-assistant" not in (hub / "skills/agent-factory/SKILL.md").read_text(encoding="utf-8"))
+        r = run("build_hub.py", "--out", str(tmp / "hub_ex"), "--no-check", "--version", "V0", "--с-примерами")
+        check("витрина: --с-примерами возвращает пример и шаблон",
+              r.returncode == 0 and (tmp / "hub_ex/hub/agent-factory/skills/agent-factory/examples/1c-dev-assistant/AGENT_SPEC.md").is_file())
+        check("витрина: копилки пусты",
+              "[]" in (hub / "skills/agent-factory/references/knowledge/registry.yaml").read_text(encoding="utf-8"))
+        check("витрина: команды в формате платформы — name по-русски, description, без шапки версии",
+              (hub / "commands/new-agent.md").read_text(encoding="utf-8").startswith("---\nname: Новый агент\ndescription:")
+              and "**Версия:**" not in (hub / "commands/new-agent.md").read_text(encoding="utf-8"))
+
+        # --- 5. Аудит пакета ----------------------------------------------------        # --- 5. Аудит пакета ----------------------------------------------------
         r = run("check_package.py", "--package", str(pkg), "--spec", str(spec))
         check("аудит: собранный пакет PASS (код 0)", r.returncode == 0 and "audit_status: PASS" in r.stdout)
         bad = tmp / "bad_pkg"
