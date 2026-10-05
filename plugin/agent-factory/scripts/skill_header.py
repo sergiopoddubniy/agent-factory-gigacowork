@@ -49,6 +49,8 @@ SPACE_TO_CATALOG = {
 LEGACY_KEYS = ("имя навыка", "когда применять", "категория", "summary")
 TRIGGERS_TITLE = "Когда использовать (триггеры)"
 SLUG = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+# Теги: slug строчными; кириллица допустима — так в образце плагина платформы.
+TAG = re.compile(r"^[a-zа-яё0-9]+(-[a-zа-яё0-9]+)*$")
 DESC_MIN, DESC_MAX = 80, 500
 NEGATIVE = re.compile(r"не для\b|не бери|не брать", re.I)
 
@@ -84,7 +86,7 @@ def tags_line(*candidates: str) -> str:
     for c in candidates:
         for t in re.split(r"[,\s]+", (c or "").lower()):
             t = t.strip("[]«»\"' ")
-            if t and SLUG.match(t) and t not in tags:
+            if t and TAG.match(t) and t not in tags:
                 tags.append(t)
     return "[" + ", ".join(tags) + "]"
 
@@ -146,8 +148,8 @@ def problems(fm: str, target: str = "space") -> list[str]:
         items = [t.strip(" '\"") for t in tags.strip("[]").split(",") if t.strip()]
         if not items or not tags.startswith("["):
             out.append("tags — список в квадратных скобках: [slug, slug]")
-        elif any(not SLUG.match(t) for t in items):
-            out.append("tags — только slug: строчная латиница, цифры, дефис")
+        elif any(not TAG.match(t) for t in items):
+            out.append("tags — только slug: строчные буквы, цифры, дефис")
     old = [k for k in LEGACY_KEYS if k in d]
     if old:
         out.append("поля " + ", ".join(f"«{k}»" for k in old)

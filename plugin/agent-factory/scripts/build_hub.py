@@ -22,7 +22,14 @@
 `selftest.py` и `selftest_delivery.py` обязаны остаться зелёными, и сборка
 это запускает сама.
 
-    python3 scripts/build_hub.py --out dist [--version V3.4] [--no-check] [--стоп-слова файл]
+    python3 scripts/build_hub.py --out dist [--version V3.5] [--no-check] [--стоп-слова файл]
+
+Заголовки витрины — по стандарту каталога GigaCowork и контракту загрузки
+навыка (`skill_header.py`): `name`, `description` одной plain-строкой без
+триггеров (триггеры — в теле навыка, раздел «Когда использовать»),
+`category` из семи, `version` целым числом, `tags` — slug. Сборка сама
+проверяет заголовки plugin.yaml, навыка, агента и команд и отсутствие
+`.pyc`/`__pycache__` в архиве; нарушение — красный код.
 
 Коды возврата: 0 — собрано и всё зелёное; 1 — шлюз или проверки красные;
 2 — ошибка входа.
@@ -36,9 +43,13 @@ import re
 import shutil
 import subprocess
 import sys
+import os
 import zipfile
 from datetime import date
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import skill_header  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 PLUGIN = HERE.parent                      # plugin/agent-factory
@@ -187,7 +198,7 @@ def fill(template: Path, **kw) -> str:
 def write_zip(src: Path, zip_path: Path) -> str:
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
         for p in sorted(src.rglob("*")):
-            if p.is_dir():
+            if p.is_dir() or p.suffix == ".pyc" or "__pycache__" in p.parts:
                 continue
             zi = zipfile.ZipInfo(str(Path(src.name) / p.relative_to(src)).replace("\\", "/"), date_time=ZIP_TS)
             zi.compress_type = zipfile.ZIP_DEFLATED
@@ -197,7 +208,109 @@ def write_zip(src: Path, zip_path: Path) -> str:
 
 
 def run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True)
+    # Проверки запускаются внутри витрины до упаковки: без этого флага Python
+    # оставлял в ней __pycache__ (дефект архивов V3.3 и V3.4 — 5 файлов .pyc).
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    return subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True, env=env)
+
+
+def run_parallel(jobs: list) -> list:
+    """Запустить несколько проверок одновременно; результаты — в порядке заданий."""
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    procs = [subprocess.Popen(cmd, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, env=env) for cmd, cwd in jobs]
+    out = []
+    for (cmd, _), pr in zip(jobs, procs):
+        so, se = pr.communicate()
+        out.append(subprocess.CompletedProcess(cmd, pr.returncode, so, se))
+    return out
+
+
+def version_int(version: str) -> int:
+    """V3.5 → 35, V4 → 40: целое для поля version каталога, растёт монотонно."""
+    m = re.match(r"V?(\d+)(?:\.(\d+))?", version.strip())
+    if not m:
+        return 1
+    return int(m.group(1)) * 10 + int(m.group(2) or 0)
+
+
+SERVICE_KEYS = ("id", "версия агента", "обновлено", "спецификация")
+
+
+def hub_skill_header(text: str, vint: int) -> str:
+    """Заголовок навыка витрины: только поля каталога, version — целое число."""
+    if not text.startswith("---\n"):
+        return text
+    end = text.index("\n---\n", 4)
+    lines = []
+    for ln in text[4:end].splitlines():
+        key = ln.split(":", 1)[0].strip().lower()
+        if key in SERVICE_KEYS:
+            continue
+        if key == "version":
+            ln = f"version: {vint}"
+        lines.append(ln)
+    return "---\n" + "\n".join(lines) + text[end:]
+
+
+def _plain_problems(where: str, value: str) -> list[str]:
+    out = []
+    if not value:
+        out.append(f"{where}: пусто")
+    elif value[:1] in "|>'\"":
+        out.append(f"{where}: нужна одна plain-строка (без блочного скаляра и кавычек)")
+    elif ": " in value:
+        out.append(f"{where}: «: » внутри строки ломает разбор")
+    if re.search(r"\bтриггер", value, re.I):
+        out.append(f"{where}: триггеры — в теле навыка (раздел «Когда использовать»), не в описании")
+    return out
+
+
+def hub_contract_problems(hub: Path) -> list[str]:
+    """Проверка заголовков витрины по стандарту каталога — до упаковки."""
+    probs: list[str] = []
+    py = skill_header.parse((hub / "plugin.yaml").read_text(encoding="utf-8"))
+    if not py.get("name"):
+        probs.append("plugin.yaml: нет name")
+    probs += _plain_problems("plugin.yaml: description", py.get("description", ""))
+    if py.get("category") not in skill_header.CATALOG_CATEGORIES:
+        probs.append(f"plugin.yaml: category «{py.get('category')}» не из семи категорий каталога")
+    if not py.get("version", "").isdigit():
+        probs.append(f"plugin.yaml: version «{py.get('version')}» — нужно целое число")
+    tags = [t.strip() for t in py.get("tags", "").strip("[]").split(",") if t.strip()]
+    if not tags or any(not skill_header.TAG.match(t) for t in tags):
+        probs.append("plugin.yaml: tags — непустой список slug (строчная латиница, цифры, дефис)")
+    skills = sorted(d.name for d in (hub / "skills").iterdir() if d.is_dir())
+    for sk in skills:
+        text = (hub / "skills" / sk / "SKILL.md").read_text(encoding="utf-8")
+        fm = text.split("---", 2)[1] if text.startswith("---") else ""
+        probs += [f"skills/{sk}/SKILL.md: {x}" for x in skill_header.problems(fm, target="catalog")]
+        probs += [f"skills/{sk}/SKILL.md: {x}" for x in skill_header.body_triggers_problems(text)]
+        extra = [k for k in skill_header.parse(fm) if k in SERVICE_KEYS]
+        if extra:
+            probs.append(f"skills/{sk}/SKILL.md: служебные поля в заголовке витрины — {', '.join(extra)}")
+        n_body = len(text.split("---", 2)[2].splitlines()) if text.startswith("---") else len(text.splitlines())
+        if n_body > 500:
+            probs.append(f"skills/{sk}/SKILL.md: тело {n_body} строк — больше 500, лишнее в справочники")
+    for a in sorted((hub / "agents").glob("*.md")):
+        d = skill_header.parse(a.read_text(encoding="utf-8").split("---", 2)[1])
+        if not d.get("name"):
+            probs.append(f"agents/{a.name}: нет name")
+        probs += _plain_problems(f"agents/{a.name}: description", d.get("description", ""))
+        used = [t.strip() for t in d.get("skills", "").strip("[]").split(",") if t.strip()]
+        alien = [u for u in used if u not in skills]
+        if not used or alien:
+            probs.append(f"agents/{a.name}: skills должен ссылаться только на навыки плагина ({', '.join(skills)})")
+    for c in sorted((hub / "commands").glob("*.md")):
+        d = skill_header.parse(c.read_text(encoding="utf-8").split("---", 2)[1])
+        if not d.get("name"):
+            probs.append(f"commands/{c.name}: нет name")
+        probs += [x for x in _plain_problems(f"commands/{c.name}: description", d.get("description", ""))
+                  if "триггер" not in x]
+    junk = [str(p.relative_to(hub)) for p in hub.rglob("*") if p.suffix == ".pyc" or p.name == "__pycache__"]
+    if junk:
+        probs.append(f"в витрине есть .pyc/__pycache__: {len(junk)}")
+    return probs
 
 
 def main(argv=None) -> int:
@@ -214,7 +327,7 @@ def main(argv=None) -> int:
     skill_md = (PLUGIN / "SKILL.md").read_text(encoding="utf-8")
     m = re.search(r"^версия агента:\s*(\S+)", skill_md, re.M)
     version = args.version or (m.group(1) if m else "V0")
-    version_num = re.sub(r"^V", "", version)
+    version_num = version_int(version)
     out = Path(args.out).resolve()
     hub = out / "hub" / "agent-factory"
     if hub.parent.exists():
@@ -224,6 +337,8 @@ def main(argv=None) -> int:
 
     stats: dict = {}
     copy_skill(skill, stats, args.with_examples)
+    sk_md = skill / "SKILL.md"
+    sk_md.write_text(hub_skill_header(sk_md.read_text(encoding="utf-8"), version_num), encoding="utf-8")
     if not args.with_examples:
         # база шаблонов пуста — индекс пересобирается тем же скриптом, что и в репозитории
         run([sys.executable, "scripts/templates.py", "--индекс"], skill)
@@ -265,20 +380,30 @@ def main(argv=None) -> int:
         gate_cmd = [sys.executable, str(HERE / "hub_gate.py"), "--папка", str(hub), "--строго"]
         if args.stop:
             gate_cmd += ["--стоп-слова", args.stop]
-        r = run(gate_cmd, hub)
+        # Три проверки независимы — запускаются параллельно, сборка вдвое быстрее.
+        # selftest.py нужен пример (examples/), которого в витрине нет намеренно:
+        # он запускается на источнике сборки — той же кодовой базе.
+        r, r1, r2 = run_parallel([
+            (gate_cmd, hub),
+            ([sys.executable, "scripts/selftest.py"], skill if args.with_examples else PLUGIN),
+            ([sys.executable, "scripts/selftest_delivery.py"], skill),
+        ])
         gate_out = r.stdout
         gate_line = "ЗЕЛЁНЫЙ (0 нарушений)" if r.returncode == 0 else f"КРАСНЫЙ (код {r.returncode})"
         ok &= r.returncode == 0
-        # selftest.py нужен пример (examples/), которого в витрине нет намеренно:
-        # он запускается на источнике сборки — той же кодовой базе.
-        r1 = run([sys.executable, "scripts/selftest.py"], skill if args.with_examples else PLUGIN)
         tail = (r1.stdout.strip().splitlines() or [""])[-1]
         self_line = f"{tail} (код {r1.returncode}; {'внутри витрины' if args.with_examples else 'на источнике сборки — в витрине нет примера'})"
         ok &= r1.returncode == 0
-        r2 = run([sys.executable, "scripts/selftest_delivery.py"], skill)
         tail2 = (r2.stdout.strip().splitlines() or [""])[-1]
         deliv_line = f"{tail2} (код {r2.returncode})"
         ok &= r2.returncode == 0
+
+    # --- заголовки по стандарту каталога и чистота архива ---
+    for junk in [p for p in hub.rglob("__pycache__") if p.is_dir()]:
+        shutil.rmtree(junk)
+    contract = hub_contract_problems(hub)
+    contract_line = "ЗЕЛЁНЫЙ" if not contract else f"КРАСНЫЙ ({len(contract)})"
+    ok &= not contract
 
     # --- архив ---
     zip_path = out / f"agent-factory_hub_{version}.zip"
@@ -298,12 +423,16 @@ def main(argv=None) -> int:
               f"- Шлюз обезличивания (строгий): {gate_line}",
               f"- selftest внутри сборки: {self_line}",
               f"- selftest_delivery внутри сборки: {deliv_line}",
+              f"- Заголовки по стандарту каталога (plugin.yaml, навык, агент, команды) и архив без .pyc: {contract_line}",
               f"- Архив: `{zip_path.name}` · SHA-256 {sha}", ""]
+    if contract:
+        report += ["## Нарушения стандарта каталога", ""] + [f"- {x}" for x in contract] + [""]
     if gate_out and "КРАСНЫЙ" in gate_line:
         report += ["## Нарушения шлюза", "", "```", gate_out.strip(), "```", ""]
     (out / "СБОРКА_ВИТРИНЫ.md").write_text("\n".join(report), encoding="utf-8")
     (out / "СБОРКА_ВИТРИНЫ.json").write_text(json.dumps({"version": version, "sha256": sha, "files": n_files,
                                                          "gate": gate_line, "selftest": self_line, "selftest_delivery": deliv_line,
+                                                         "catalog_contract": contract,
                                                          "scrubbed": stats}, ensure_ascii=False, indent=2), encoding="utf-8")
     print("\n".join(report))
     return EXIT_OK if ok else EXIT_RED
