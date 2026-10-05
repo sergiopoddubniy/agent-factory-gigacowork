@@ -281,6 +281,8 @@ def main() -> int:
               r.returncode == 1 and "[ДАТА]" not in r.stdout and "[ОРГ-ФОРМА]" in r.stdout, r.stdout[-400:])
         r = run("hub_gate.py", "--папка", str(tmp / "нет_папки"), "--строго")
         check("шлюз: нет папки → код 2", r.returncode == 2)
+        sys.path.insert(0, str(HERE))
+        import build_hub as _bh
         hub_out = tmp / "hub_out"
         r = run("build_hub.py", "--out", str(hub_out), "--no-check", "--version", "V0", "--date", "2026-09-21")
         hub = hub_out / "hub" / "agent-factory"
@@ -289,7 +291,7 @@ def main() -> int:
                                                                       "skills/agent-factory/SKILL.md", "agent.html", "README.md")), r.stdout[-400:])
         r = run("hub_gate.py", "--папка", str(hub), "--строго")
         check("витрина: строгий шлюз — 0 нарушений (даты и адреса платформы вырезаны)", r.returncode == 0, r.stdout[-600:])
-        hub_pkg = (hub / "skills/agent-factory/references/agent_package.md").read_text(encoding="utf-8")
+        hub_pkg = (hub / "skills/agent-factory/Референсы/agent_package.md").read_text(encoding="utf-8")
         check("витрина: правила сохранены, провенанс вырезан",
               "Шесть видов инварианта" in hub_pkg and ("28.08" + ".2026") not in hub_pkg and ("27.08" + ".2026") not in hub_pkg)
         hub_st = (hub / "skills/agent-factory/scripts/selftest_delivery.py").read_text(encoding="utf-8")
@@ -303,20 +305,46 @@ def main() -> int:
               zp.is_file() and utf8 and any("ПРИЁМОЧНЫЙ_ПРОГОН" in n for n in names) and not any("#U" in n for n in names))
         check("витрина: референсов нет — ни examples/, ни шаблонов в базе; индекс базы пересобран на ноль",
               not (hub / "skills/agent-factory/examples").exists()
-              and not any(p.is_dir() for p in (hub / "skills/agent-factory/references/agent_templates").iterdir())
-              and "Шаблонов: **0**" in (hub / "skills/agent-factory/references/agent_templates/ИНДЕКС.md").read_text(encoding="utf-8")
+              and not any(p.is_dir() for p in (hub / "skills/agent-factory/agent_templates").iterdir())
+              and "Шаблонов: **0**" in (hub / "skills/agent-factory/agent_templates/ИНДЕКС.md").read_text(encoding="utf-8")
               and "examples/1c-dev-assistant" not in (hub / "skills/agent-factory/SKILL.md").read_text(encoding="utf-8"))
-        hub_tpl_readme = (hub / "skills/agent-factory/references/agent_templates/00_ЧТО_ЗДЕСЬ_И_ЧЕГО_ЗДЕСЬ_НЕТ.md").read_text(encoding="utf-8")
+        hub_tpl_readme = (hub / "skills/agent-factory/agent_templates/00_ЧТО_ЗДЕСЬ_И_ЧЕГО_ЗДЕСЬ_НЕТ.md").read_text(encoding="utf-8")
         check("витрина: описание базы шаблонов говорит о пустой базе, а не перечисляет шаблоны репозитория",
               "пуста намеренно" in hub_tpl_readme and "Логистика/" not in hub_tpl_readme and "Клиент-" not in hub_tpl_readme)
         r = run("build_hub.py", "--out", str(tmp / "hub_ex"), "--no-check", "--version", "V0", "--с-примерами")
         check("витрина: --с-примерами возвращает пример и шаблон",
               r.returncode == 0 and (tmp / "hub_ex/hub/agent-factory/skills/agent-factory/examples/1c-dev-assistant/AGENT_SPEC.md").is_file())
         check("витрина: копилки пусты",
-              "[]" in (hub / "skills/agent-factory/references/knowledge/registry.yaml").read_text(encoding="utf-8"))
+              "[]" in (hub / "skills/agent-factory/knowledge/registry.yaml").read_text(encoding="utf-8"))
+        hsk = hub / "skills/agent-factory"
+        lay = _bh.hub_layout_problems(hub)
+        check("витрина: справочники в «Референсы/» одним уровнем — пайплайны и шаблоны там же, references/ и templates/ нет, данные скриптов рядом",
+              not lay and (hsk / "Референсы" / "pipeline_single_agent.md").is_file()
+              and (hsk / "Референсы" / "AGENT_SPEC.template.md").is_file()
+              and not (hsk / "references").exists() and not (hsk / "templates").exists()
+              and (hsk / "knowledge").is_dir() and (hsk / "agent_templates").is_dir()
+              and "`Референсы/pipeline_single_agent.md`" in (hsk / "SKILL.md").read_text(encoding="utf-8"),
+              "; ".join(lay)[:400])
+        сломать = tmp / "hub_bad_layout"
+        shutil.copytree(hub, сломать)
+        (сломать / "skills/agent-factory/Референсы/вложенная").mkdir()
+        (сломать / "skills/agent-factory/Референсы/вложенная/x.md").write_text("x", encoding="utf-8")
+        f = сломать / "skills/agent-factory/SKILL.md"
+        f.write_text(f.read_text(encoding="utf-8") + "\nСм. `references/agent_spec.md` и `Референсы/нет_такого.md`.\n",
+                     encoding="utf-8")
+        lay2 = " | ".join(_bh.hub_layout_problems(сломать))
+        check("витрина: проверка раскладки ловит вложенную папку, оставшееся references и ссылку в никуда",
+              "вложенные папки" in lay2 and "«references» осталось" in lay2 and "нет_такого.md" in lay2, lay2[:400])
         check("витрина: команды в формате платформы — name по-русски, description, без шапки версии",
               (hub / "commands/new-agent.md").read_text(encoding="utf-8").startswith("---\nname: Новый агент\ndescription:")
               and "**Версия:**" not in (hub / "commands/new-agent.md").read_text(encoding="utf-8"))
+        hub_cmds = sorted(p.name for p in (hub / "commands").glob("*.md"))
+        check("витрина: три короткие команды пользователя с параметрами ${…} — Новый агент, Улучшить агента, Выпустить агента; команды консультанта — в папке навыка",
+              hub_cmds == sorted(_bh.HUB_COMMANDS)
+              and "${задача}" in (hub / "commands/new-agent.md").read_text(encoding="utf-8")
+              and "${что_не_так}" in (hub / "commands/improve-agent.md").read_text(encoding="utf-8")
+              and all("pipeline_user_path.md" in (hub / "commands" / c).read_text(encoding="utf-8") for c in hub_cmds)
+              and (hub / "skills/agent-factory/commands/acceptance.md").is_file(), str(hub_cmds))
 
         # --- 5. Аудит пакета ----------------------------------------------------        # --- 5. Аудит пакета ----------------------------------------------------
         r = run("check_package.py", "--package", str(pkg), "--spec", str(spec))
@@ -512,6 +540,93 @@ def main() -> int:
               r.returncode == 0 and top is not None and top.group(1) == "kontragent-proverka", r.stdout[-400:])
         r = run("agent_registry.py", "--похожие", "подготовить техническое задание по запросу")
         check("порт: agent_registry.py --похожие отвечает (пустая выдача — тоже ответ)", r.returncode == 0, r.stdout[-300:])
+
+        # --- 9а. Состояние пишется туда, где можно писать ------------------
+        # На платформе папка навыка только на чтение (проба 05.10.2026):
+        # реестр, журнал сканирований и перенесённые находки уходят в рабочую
+        # папку сессии. Скрипт, пишущий рядом с собой, там падает посреди работы.
+        import os as _os
+        env0 = {k: v for k, v in _os.environ.items()
+                if k not in ("FACTORY_DATA", "FACTORY_SESSION")}
+        env0["PYTHONDONTWRITEBYTECODE"] = "1"
+        зн = ROOT / "references" / "knowledge"
+        до = {f.name: f.read_bytes() for f in зн.iterdir() if f.is_file()}
+        данные = tmp / "factory_data"
+        r = subprocess.run([PY, str(HERE / "agent_registry.py"), "--индекс"],
+                           capture_output=True, text=True,
+                           env=dict(env0, FACTORY_DATA=str(данные)))
+        после = {f.name: f.read_bytes() for f in зн.iterdir() if f.is_file()}
+        check("рабочая папка: FACTORY_DATA — реестр и индекс пишутся туда, копилка скилла не тронута",
+              r.returncode == 0 and (данные / "знания" / "ИНДЕКС.md").exists()
+              and (данные / "знания" / "registry.yaml").exists() and до == после
+              and "FACTORY_DATA" in r.stdout, r.stdout[-300:])
+
+        sys.path.insert(0, str(HERE))
+        import workdir as _wd
+        сессия = tmp / "session"
+        сессия.mkdir()
+        источник = tmp / "ro_source"
+        источник.mkdir()
+        (источник / "registry.yaml").write_text("# пусто\n", encoding="utf-8")
+        _orig_w, _orig_s = _wd.writable, _wd.SESSION
+        try:
+            _wd.SESSION = сессия
+            _wd.writable = lambda p: (p is not None and Path(p).resolve() != источник.resolve()
+                                      and _orig_w(p))
+            env_bak = _os.environ.pop("FACTORY_DATA", None)
+            d = _wd.state_dir(источник, "знания", ("registry.yaml",))
+            rd = _wd.read_dir(источник, "знания")
+            msg = _wd.where(d, источник)
+        finally:
+            _wd.writable, _wd.SESSION = _orig_w, _orig_s
+            if env_bak is not None:
+                _os.environ["FACTORY_DATA"] = env_bak
+        check("рабочая папка: источник только на чтение — папка в /session/фабрика/<вид>, источник скопирован, чтение идёт оттуда же, пользователю сказано, где файлы",
+              d == сессия / "фабрика" / "знания" and (d / "registry.yaml").exists()
+              and rd == d and "рабочую папку сессии" in msg and "«Документы»" in msg,
+              f"{d} · {rd} · {msg[:120]}")
+
+        if getattr(_os, "geteuid", lambda: 0)() != 0:
+            # Настоящие права, а не подмена: копия скилла с папками только на чтение.
+            ro = tmp / "skill_ro"
+            shutil.copytree(HERE, ro / "scripts", ignore=shutil.ignore_patterns("__pycache__"))
+            (ro / "proj" / "09_Контур_улучшения").mkdir(parents=True)
+            находки = ro / "proj" / "09_Контур_улучшения" / "НАХОДКИ_ДЛЯ_СКИЛЛА.md"
+            находки.write_text(
+                "# Находки\n\n### Н-1. Агент не спрашивает период\n\n"
+                "**Где вскрылось:** прогон\n**Что произошло:** период по умолчанию.\n"
+                "**Чего не хватило в скилле:** правила спросить.\n"
+                "**Чем проверим:** прогон без периода.\n**Статус:** новая\n",
+                encoding="utf-8")
+            бэклог = ro / "БЭКЛОГ.md"
+            бэклог.write_text("# БЭКЛОГ\n\n### С-7. старое\n\n---\n\n## Закрытое\n",
+                              encoding="utf-8")
+            сессия2 = tmp / "session2"
+            сессия2.mkdir()
+            закрыть = [находки, бэклог, находки.parent, ro]
+            for f in закрыть:
+                f.chmod(0o555 if f.is_dir() else 0o444)
+            try:
+                env = dict(env0, FACTORY_SESSION=str(сессия2))
+                аргс = [PY, str(ro / "scripts" / "promote_finding.py"),
+                        "--проект", str(ro / "proj"), "--бэклог", str(бэклог)]
+                r1 = subprocess.run(аргс, capture_output=True, text=True, env=env)
+                r2 = subprocess.run(аргс, capture_output=True, text=True, env=env)
+            finally:
+                for f in закрыть:
+                    f.chmod(0o755 if f.is_dir() else 0o644)
+            копия = сессия2 / "фабрика" / "находки"
+            текст = (копия / "БЭКЛОГ.md").read_text(encoding="utf-8") if (копия / "БЭКЛОГ.md").exists() else ""
+            check("рабочая папка: бэклог и находки только на чтение — перенос в копию в /session, повторный запуск не дублирует",
+                  r1.returncode == 0 and текст.count("### С-8.") == 1
+                  and "перенесена" in (копия / "НАХОДКИ_ДЛЯ_СКИЛЛА.md").read_text(encoding="utf-8")
+                  and "Новых находок нет" in r2.stdout
+                  and "С-8" not in бэклог.read_text(encoding="utf-8")
+                  and "рабочую папку сессии" in r1.stdout,
+                  (r1.stdout + r2.stdout)[-400:])
+        else:
+            check("рабочая папка: бэклог только на чтение — проверка прав под root невозможна, логика проверена подменой выше",
+                  True)
         r = run("token_budget.py", str(ROOT))
         check("порт: token_budget.py — оркестратор SKILL.md в норме (≤5000 токенов, ≤500 строк); справочники читаются по надобности",
               r.returncode in (0, 1, 2) and "порог: 5,000 токенов или 500 строк  →  в норме" in r.stdout, r.stdout[:600])
@@ -537,9 +652,88 @@ def main() -> int:
         r = run("audit_findings.py")
         check("порт: audit_findings.py — журнал находок сверяется со справочниками (код 0)", r.returncode == 0, r.stdout[-400:])
 
+        # --- 9в. Путь обычного пользователя: проверка черновика и выпуск -------
+        import zipfile as _zf
+        import skill_header as _sh
+        import build_user_package as _bu
+        up = tmp / "user" / "Агент" / "проект"
+        up.mkdir(parents=True)
+        (up / "AGENT_SPEC.md").write_text(base, encoding="utf-8")
+        kb_u = tmp / "user" / "Агент" / "база_знаний" / "Программа"
+        kb_u.mkdir(parents=True)
+        (kb_u / "run.py").write_text("print('ядро')\n", encoding="utf-8")
+        ua = ["--проект", str(up), "--date", "2026-10-05"]
+        uo = up.parent
+        r = run("build_user_package.py", *ua, "--проверка", "1")
+        r2 = run("build_user_package.py", *ua, "--проверка", "1")
+        name_u = "Ассистент 1С-разработки"
+        chk = uo / f"Проверка — {name_u}, черновик 1.zip"
+        code_m = re.search(r"Черновик 1 · ([A-Z2-9]{4})", r.stdout)
+        names_c = _zf.ZipFile(chk).namelist() if chk.exists() else []
+        head_c = _zf.ZipFile(chk).read("ПРОВЕРКА.md").decode("utf-8") if "ПРОВЕРКА.md" in names_c else ""
+        check("путь пользователя: архив проверки — шапка с кодом черновика, навык, команда, карточка, база знаний; код повторяется на том же входе и записан в проекте",
+              r.returncode == 0 and code_m is not None and code_m.group(1) in head_c.splitlines()[0]
+              and f"Первая строка ответа: «Черновик 1 · {code_m.group(1)}»" in head_c
+              and all(n in names_c for n in ("2_Навык.md", "3_Команда.md", "4_Карточка_агента.md",
+                                             f"1_База знаний {name_u}/Программа/run.py",
+                                             f"1_База знаний {name_u}/00_Что_здесь_и_чего_нет.md"))
+              and code_m.group(1) in r2.stdout
+              and code_m.group(1) in (up / "ЧЕРНОВИКИ.md").read_text(encoding="utf-8"),
+              r.stdout[-400:] + r.stderr[-300:])
+        r = run("build_user_package.py", *ua, "--выпуск", "1", "--уровень", "Пилот")
+        r_p = run("build_user_package.py", *ua, "--выпуск", "1", "--уровень", "Пилот", "--проверено", "9 из 9")
+        check("путь пользователя: «Пилот» без отчёта о контрольной проверке — код 2; спецификация ниже порога pilot — код 1",
+              r.returncode == 2 and r_p.returncode == 1 and "ниже порога pilot" in r_p.stdout,
+              f"{r.returncode}/{r_p.returncode}")
+        r = run("build_user_package.py", *ua, "--выпуск", "1")
+        pz = uo / f"Пакет — {name_u}, версия 1.zip"
+        pn = _zf.ZipFile(pz).namelist() if pz.exists() else []
+        sk_u = _zf.ZipFile(pz).read("2_Навык.md").decode("utf-8") if "2_Навык.md" in pn else ""
+        cmd_u = _zf.ZipFile(pz).read("3_Команда.md").decode("utf-8") if "3_Команда.md" in pn else ""
+        card_u = _zf.ZipFile(pz).read("4_Карточка_агента.md").decode("utf-8") if "4_Карточка_агента.md" in pn else ""
+        fm_u = sk_u.split("---", 2)[1] if sk_u.startswith("---") else ""
+        cfm = _sh.parse(cmd_u.split("---", 2)[1]) if cmd_u.startswith("---") else {}
+        kfm = _sh.parse(card_u.split("---", 2)[1]) if card_u.startswith("---") else {}
+        check("путь пользователя: выпуск — пакет по шагам 0–5, навык по контракту загрузки, команда с ${задача}, карточка с двойным включением навыка",
+              r.returncode == 0
+              and all(n in pn for n in ("0_Как_собрать_агента.md", "2_Навык.md", "3_Команда.md",
+                                        "4_Карточка_агента.md", "5_Приёмка.md"))
+              and not _sh.problems(fm_u, target="space") and not _sh.body_triggers_problems(sk_u)
+              and cfm.get("name") == "ассистент-1с-разработки" and cfm.get("description")
+              and "${задача}" in cmd_u
+              and kfm.get("name") == name_u and kfm.get("skills") and "Ты всегда начинаешь работу с чтения и активации" in card_u,
+              r.stdout[-300:] + r.stderr[-300:] + str(_sh.problems(fm_u, target="space")))
+        pas = uo / f"Паспорт — {name_u}, версия 1.md"
+        pas_t = pas.read_text(encoding="utf-8") if pas.exists() else ""
+        up_t = (ROOT / "references" / "pipeline_user_path.md").read_text(encoding="utf-8")
+        check("путь пользователя: уровни агента дословно одинаковы в пути пользователя, в сборщике и в паспорте",
+              all(v[0] in up_t and v[0] in pas_t and f"| {k} |" in up_t for k, v in _bu.УРОВНИ.items()),
+              "расхождение определений: «пилот» должен значить одно и то же везде")
+        prz = uo / f"Проект — {name_u}.zip"
+        prn = _zf.ZipFile(prz).namelist() if prz.exists() else []
+        check("путь пользователя: файл проекта хранит спецификацию, черновики и выпущенную версию с базой знаний",
+              all(n in prn for n in ("AGENT_SPEC.md", "ПРОЕКТ.md", "ЧЕРНОВИКИ.md", "версии/V1/AGENT_SPEC.md",
+                                     "версии/V1/2_Навык.md", "версии/V1/ВЫПУСК.json",
+                                     "версии/V1/база_знаний/Программа/run.py")), str(prn[:12]))
+        (up / "AGENT_SPEC.md").write_text(base.replace("версия спецификации: S8", "версия спецификации: S9"),
+                                          encoding="utf-8")
+        r = run("build_user_package.py", *ua, "--выпуск", "1")
+        r2 = run("build_user_package.py", "--проект", str(up), "--spec", str(up / "версии/V1/AGENT_SPEC.md"),
+                 "--выпуск", "1", "--out", str(tmp / "user_back"))
+        back = tmp / "user_back" / pz.name
+        check("путь пользователя: выпущенная версия не переписывается (код 2), «Вернуть прошлую версию» выдаёт её байт в байт",
+              r.returncode == 2 and r2.returncode == 0 and back.exists() and back.read_bytes() == pz.read_bytes(),
+              r.stderr[-200:] + r2.stdout[-200:])
+        low = tmp / "user_low" / "проект"
+        low.mkdir(parents=True)
+        (low / "AGENT_SPEC.md").write_text(mutate(base, 12, None), encoding="utf-8")
+        r = run("build_user_package.py", "--проект", str(low), "--проверка", "1")
+        check("путь пользователя: спецификация ниже порога demo — код 1, ничего не собрано",
+              r.returncode == 1 and not list((tmp / "user_low").glob("*.zip")), r.stdout[-200:])
+
         # --- 9б. Связанность скилла: каждый референс назван в шаге пайплайна --------
         orch = (ROOT / "SKILL.md").read_text(encoding="utf-8")
-        orch += "".join(p.read_text(encoding="utf-8") for p in (ROOT / "references" / "pipelines").glob("*.md"))
+        orch += "".join(p.read_text(encoding="utf-8") for p in (ROOT / "references").glob("pipeline_*.md"))
         orch += "".join(p.read_text(encoding="utf-8") for p in (ROOT / "commands").glob("*.md"))
         refs = [p.name for p in (ROOT / "references").glob("*.md")]
         unnamed = [n for n in refs if n not in orch]

@@ -62,12 +62,12 @@ missed, unapplied = [], []
 for needle, rel, why in LANDED:
     tmp = pathlib.Path(tempfile.mkdtemp()) / "skill"
     shutil.copytree(S, tmp, ignore=lambda d, n: [x for x in n if x == "__pycache__"])
-    # Оркестратор фабрики — SKILL.md плюс references/pipelines/*.md; игла с
+    # Оркестратор фабрики — SKILL.md плюс references/pipeline_*.md; игла с
     # адресом SKILL.md вырезается из всех этих файлов сразу, иначе копия в
     # пайплайне держит проверку зелёной, а мутация выглядит пропущенной.
     targets = [tmp / rel]
     if rel == "SKILL.md":
-        targets += sorted((tmp / "references" / "pipelines").glob("*.md"))
+        targets += sorted((tmp / "references").glob("pipeline_*.md"))
     # Проверка сравнивает нормализованный текст, поэтому игла может быть
     # перенесена по строкам. Дословная замена такую не находит.
     rx = re.compile(r"\s+".join(re.escape(w) for w in needle.split()))

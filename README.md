@@ -25,7 +25,7 @@
 > delivery kit generated from the spec against a canonical composition, an
 > acceptance run, and an outcome check. Pure Python (stdlib only), 40
 > reference docs, 31 scripts, 18 anonymised agent templates across five
-> business functions, 121 + 412 self-checks, mutation stands. The
+> business functions, 134 + 414 self-checks, mutation stands. The
 > project is in Russian; the reference docs are the product. Start with
 > `docs/00_Концепция.md` and `docs/01_Архитектура.md`.
 
@@ -71,8 +71,8 @@
 git clone https://github.com/sergiopoddubniy/agent-factory-gigacowork.git
 cd agent-factory-gigacowork/plugin/agent-factory
 
-python3 scripts/selftest.py             # 121 проверка фабрики, код 0
-python3 scripts/selftest_delivery.py    # 412 проверок исходного скилла, код 0
+python3 scripts/selftest.py             # 134 проверки фабрики, код 0
+python3 scripts/selftest_delivery.py    # 414 проверок исходного скилла, код 0
 
 E=examples/1c-dev-assistant
 python3 scripts/spec_readiness.py --spec $E/AGENT_SPEC.md                    # demo: PASS
@@ -109,10 +109,10 @@ python3 scripts/build_delivery.py --spec $E/AGENT_SPEC.md --out /tmp/поста�
 plugin/agent-factory/       то, что уходит на платформу
   SKILL.md                  оркестратор: правила, режимы, задачи, маршрут (~5 тыс. токенов)
   commands/                 9 команд
-  references/               40 справочников; pipelines/ — стадии трёх режимов;
+  references/               41 справочник; pipeline_*.md — путь пользователя и стадии трёх режимов;
                             agent_templates/ — база шаблонов: 18 агентов по 5 функциям (в витрину не входит)
   templates/                шаблон спецификации, шаблон приёмочного прогона; hub/ — раскладка плагина платформы
-  scripts/                  31 скрипт, stdlib, Python 3.10+; build_hub.py — витринная сборка, hub_gate.py — шлюз обезличивания
+  scripts/                  34 скрипта, stdlib, Python 3.10+; build_hub.py — витринная сборка, hub_gate.py — шлюз обезличивания
   examples/1c-dev-assistant/  спецификация, материалы, комплект поставки, прогон (референс; в витрину не входит)
 docs/                       концепция, архитектура, валидация для платформы, руководство по внедрению
                             AgentSpec в скилл, сверка с исходным скиллом, политика обезличивания, поставка витрины
@@ -126,9 +126,10 @@ CLAUDE.md                   процедура проверки для аген�
 
 | Режим | Когда | Пайплайн |
 |---|---|---|
-| Одиночный агент | один процесс, одна роль | `references/pipelines/single_agent.md` |
-| Портфель | несколько агентов, воркшоп, единое пространство | `references/pipelines/portfolio.md` |
-| Апгрейд в пилот | показанный портфель переводится на реальные данные | `references/pipelines/pilot_upgrade.md` |
+| Путь пользователя | человек делает агента под свою работу: уровень, примеры, черновик, контроль в новом чате, выпуск пакетом, улучшение (витрина V3.5) | `references/pipeline_user_path.md` |
+| Одиночный агент | один процесс, одна роль | `references/pipeline_single_agent.md` |
+| Портфель | несколько агентов, воркшоп, единое пространство | `references/pipeline_portfolio.md` |
+| Апгрейд в пилот | показанный портфель переводится на реальные данные | `references/pipeline_pilot_upgrade.md` |
 
 Задача комплекта — **демонстрация**, **воркшоп** или **пилот** — добавляет
 к общему ядру состава свою надстройку: сценарий показа и запасной

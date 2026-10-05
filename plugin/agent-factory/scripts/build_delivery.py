@@ -117,16 +117,12 @@ def _summary(text: str, n: int = 2) -> str:
     return " ".join(s[:n]).strip()
 
 
-def render_card(spec: Spec, num: int, version: str, today: str, task: str) -> str:
+def activation_text(spec: Spec) -> str:
+    """Блок активации навыка для поля «Инструкция» карточки: одна фраза при
+    одном навыке, список при навыках пространства. Общий для карточки
+    комплекта и карточки пакета пользователя (`build_user_package.py`)."""
     name = spec.fm("имя агента")
-    b1, b5, b7, b11 = spec.block(1), spec.block(5), spec.block(7), spec.block(11)
-    inside, outside = scope_lists(b7)
-    ins, outs = io_lists(spec.block(6))
-    ws, conns = workspace_skills(b11), connectors(b11)
-    access = spec.fm("уровень доступа") or "L0"
-    cmds = all_commands(spec, num)
-
-    # Блок активации: одна фраза при одном навыке, список при навыках пространства
+    ws = workspace_skills(spec.block(11))
     if ws:
         steps = [f"навык пространства «{w['name']}» — {w['why'] or 'правила работы с внешней системой'}"
                  for w in ws] + [f"свой навык «{name}»"]
@@ -143,6 +139,19 @@ def render_card(spec: Spec, num: int, version: str, today: str, task: str) -> st
         activation = (f"Активируй навык «{name}».\nТы всегда начинаешь работу с чтения и активации "
                       f"навыка «{name}».\nТолько после этого ты следуешь инструкциям и командам "
                       "пользователя.")
+    return activation
+
+
+def render_card(spec: Spec, num: int, version: str, today: str, task: str) -> str:
+    name = spec.fm("имя агента")
+    b1, b5, b7, b11 = spec.block(1), spec.block(5), spec.block(7), spec.block(11)
+    inside, outside = scope_lists(b7)
+    ins, outs = io_lists(spec.block(6))
+    ws, conns = workspace_skills(b11), connectors(b11)
+    access = spec.fm("уровень доступа") or "L0"
+    cmds = all_commands(spec, num)
+
+    activation = activation_text(spec)
 
     lines = [f"# Карточка агента — {name}", "",
              f"**id:** {spec.slug}", f"**Версия:** {version} · **Обновлено:** {today}", "",

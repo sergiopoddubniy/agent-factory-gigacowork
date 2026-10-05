@@ -14,7 +14,7 @@ https://github.com/sergiopoddubniy/agent-factory-gigacowork — всё, что �
   `scripts/build_agent_package.py` (пакет), руками не правятся.
 - Целевой состав поставки — `references/delivery_composition.md`, единственный
   источник; оркестратор `SKILL.md` его не дублирует. Стадии режимов —
-  `references/pipelines/`; справочники исходного скилла лежат дословно.
+  `references/pipeline_*.md`; справочники исходного скилла лежат дословно.
 - Пример `examples/1c-dev-assistant/комплект/` и `комплект_загрузка/` —
   порождены из спецификации примера командой из README; после правки
   примера пересобрать с `--date 2026-09-21` (selftest сверяет отпечаток и
@@ -22,14 +22,14 @@ https://github.com/sergiopoddubniy/agent-factory-gigacowork — всё, что �
 
 ## Перед сохранением любой правки
 
-1. `python3 plugin/agent-factory/scripts/selftest.py` — код 0 (121 проверка);
-   `python3 plugin/agent-factory/scripts/selftest_delivery.py` — 412/412.
+1. `python3 plugin/agent-factory/scripts/selftest.py` — код 0 (134 проверки);
+   `python3 plugin/agent-factory/scripts/selftest_delivery.py` — 414/414.
    После правки справочников — `scripts/mutate_landed.py` (иглы находок),
    после правки сборщика — `scripts/mutate_build.py`, после правки
    оркестратора — `scripts/mutate_budget.py` (4/4).
 2. Если менялся `SKILL.md` — `scripts/token_budget.py ..`: оркестратор
    остаётся в норме (≤ 5000 токенов, ≤ 500 строк); подробности уходят в
-   `references/pipelines/` и справочники, а не в оркестратор.
+   `references/pipeline_*.md` и справочники, а не в оркестратор.
 3. Запись в `ЖУРНАЛ_ВЕРСИЙ.md`: версия, дата, что изменилось, зачем.
 4. Версия во фронтматтере `SKILL.md` (`версия агента: V<N>`, `обновлено:`)
    и в шапках команд — совпадают с журналом.

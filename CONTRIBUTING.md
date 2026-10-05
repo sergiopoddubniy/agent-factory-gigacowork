@@ -10,8 +10,8 @@
 Из `plugin/agent-factory/`:
 
 ```bash
-python3 scripts/selftest.py             # фабрика: 121 проверка, код 0
-python3 scripts/selftest_delivery.py    # исходный скилл: 412/412
+python3 scripts/selftest.py             # фабрика: 134 проверки, код 0
+python3 scripts/selftest_delivery.py    # исходный скилл: 414/414
 python3 scripts/mutate_landed.py        # иглы находок вырезаются и ловятся: 118/118
 python3 scripts/mutate_build.py         # порча сборщика ловится: 6/6
 python3 scripts/mutate_budget.py        # порча оркестратора ловится: 4/4
@@ -32,7 +32,7 @@ python3 scripts/token_budget.py         # SKILL.md в норме: ≤ 5000 то�
 | что порождается из спецификации | `scripts/build_delivery.py`, `scripts/build_agent_package.py` | проверка в `scripts/selftest.py`; пересобрать пример (`README.md`, быстрый старт) с `--date 2026-09-21` |
 | ворота готовности | `scripts/spec_readiness.py` | находка `Ф-NN-ИМЯ` с текстом «что править»; мутация спецификации в `selftest.py` |
 | состав поставки | `references/delivery_composition.md` — единственный источник | `check_delivery.py` читает его; оркестратор состав не дублирует |
-| маршрут работы | `SKILL.md` — только правила и маршрут | подробности уходят в `references/pipelines/`; бюджет токенов проверяется |
+| маршрут работы | `SKILL.md` — только правила и маршрут | подробности уходят в `references/pipeline_*.md`; бюджет токенов проверяется |
 | спецификация агента | `templates/AGENT_SPEC.template.md`, `references/agent_spec.md` | пример `examples/1c-dev-assistant/AGENT_SPEC.md`, версия `S<N>` |
 
 После любой правки — запись в `ЖУРНАЛ_ВЕРСИЙ.md`: версия, дата, что

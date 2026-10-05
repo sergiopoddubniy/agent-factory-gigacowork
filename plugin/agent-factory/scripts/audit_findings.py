@@ -102,10 +102,10 @@ def main() -> int:
              for p in [ROOT / "SKILL.md", *REFS.glob("*.md"), *(ROOT / "scripts").glob("*.py")]}
     # В фабрике оркестратор разнесён: SKILL.md держит только маршрутизацию и
     # правила, применяемые всегда, а пайплайны режимов лежат в
-    # references/pipelines/*.md. Адрес «SKILL.md» в журнале находок относится к
+    # references/pipeline_*.md. Адрес «SKILL.md» в журнале находок относится к
     # оркестратору целиком — иначе каждый перенос стадии в пайплайн выглядел бы
     # как пропавшая находка.
-    for p in sorted((REFS / "pipelines").glob("*.md")):
+    for p in sorted(REFS.glob("pipeline_*.md")):
         texts["SKILL.md"] += "\n" + norm(p.read_text(encoding="utf-8"))
 
     # Находка может относиться не к скиллу, а к платформе или к стенду теста.

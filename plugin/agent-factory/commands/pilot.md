@@ -9,7 +9,7 @@ version: 1.0.0
 **Версия:** V3.5 · 2026-10-05
 
 Активируй навык «Фабрика агентов GigaCowork» и выполни режим «апгрейд в
-пилот» по `references/pipelines/pilot_upgrade.md`.
+пилот» по `references/pipeline_pilot_upgrade.md`.
 
 ## Параметры запуска
 Название задачи: апгрейд портфеля (или агента) в пилот

@@ -9,7 +9,7 @@ version: 1.0.0
 **Версия:** V3.5 · 2026-10-05
 
 Активируй навык «Фабрика агентов GigaCowork» и выполни режим «портфель» по
-`references/pipelines/portfolio.md`.
+`references/pipeline_portfolio.md`.
 
 ## Параметры запуска
 Название задачи: портфель агентов

@@ -51,17 +51,18 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "scripts"
 REFS = ROOT / "references"
 CARD = SCRIPTS / "build_agent_card.py"
-PIPELINES = REFS / "pipelines"
+PIPELINES = REFS  # пайплайны режимов — references/pipeline_<режим>.md
 
 
 def orchestrator_text() -> str:
     """Оркестратор фабрики разнесён: SKILL.md — маршрутизация и правила, применяемые
-    всегда; пайплайны режимов — references/pipelines/*.md. Проверки исходного
+    всегда; пайплайны режимов — references/pipeline_*.md. Проверки исходного
     скилла, читавшие SKILL.md, читают оркестратор целиком."""
     sk = (ROOT / "SKILL.md").read_text(encoding="utf-8")
     cut = sk.find("## Принципы")
     head, tail = (sk[:cut], sk[cut:]) if cut > 0 else (sk, "")
-    order = ("single_agent.md", "portfolio.md", "pilot_upgrade.md")
+    order = ("pipeline_user_path.md", "pipeline_single_agent.md", "pipeline_portfolio.md",
+             "pipeline_pilot_upgrade.md")
     parts = [head] + [(PIPELINES / n).read_text(encoding="utf-8") for n in order if (PIPELINES / n).exists()]
     return "\n".join(parts + [tail])
 
@@ -966,7 +967,7 @@ def block_findings_landed() -> None:
                 # пайплайны режимов — часть оркестратора.
                 if "## Справочные файлы" in txt:
                     txt = txt[:txt.find("## Справочные файлы")]
-                txt += "\n" + "\n".join(q.read_text(encoding="utf-8") for q in sorted(PIPELINES.glob("*.md")))
+                txt += "\n" + "\n".join(q.read_text(encoding="utf-8") for q in sorted(PIPELINES.glob("pipeline_*.md")))
             cache[rel] = norm(txt)
         check(f"{rel.split('/')[-1]}: «{needle[:44]}»",
               norm(needle) in cache[rel], why)

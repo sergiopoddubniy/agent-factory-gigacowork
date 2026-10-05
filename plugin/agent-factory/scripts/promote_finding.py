@@ -17,6 +17,16 @@
 
 Находка без графы «чем проверим» не переносится: в бэклоге скилла такая
 строка — мнение, а мнению там не место.
+
+**Где запись невозможна.** На платформе папка навыка и документы
+пространства доступны только на чтение. Тогда дополненный бэклог и файл
+находок с новыми статусами пишутся в рабочую папку сессии
+`/session/фабрика/находки/` (`workdir.py`), а скрипт говорит об этом вслух:
+файлы оттуда скачивают и передают владельцу скилла. Бэклога скилла на
+платформе нет вовсе — тогда в той же папке заводится новый файл
+`БЭКЛОГ_<скилл>.md`. Вне платформы ненайденный бэклог по-прежнему ошибка:
+молча завести новый файл значило бы принять «не нашёл» за «переносить
+нечего».
 """
 from __future__ import annotations
 
@@ -28,6 +38,8 @@ import sys
 import unicodedata
 
 SKILL_ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import workdir                                       # noqa: E402  куда писать
 
 
 # Куда переносить: находка может относиться к любому скиллу конвейера.
@@ -139,7 +151,10 @@ def main() -> int:
     if not src.exists():
         print(f"Нет файла находок: {src}")
         return 2
-    text = nfc(src.read_text(encoding="utf-8"))
+    # Читать — то, что записали в прошлый раз: на платформе статусы
+    # «перенесена» лежат в копии в рабочей папке сессии, и чтение исходника
+    # перенесло бы те же находки второй раз.
+    text = nfc(workdir.read_path(src, "находки").read_text(encoding="utf-8"))
     items = parse(text)
     fresh = [f for f in items
              if "перенесена" not in f["status"] and "закрыта" not in f["status"]]
@@ -164,6 +179,19 @@ def main() -> int:
         target = next(iter(by_skill), SKILLS["gigacowork-agent-scenario"])
 
     backlog = pathlib.Path(a.backlog) if a.backlog else backlog_for(target)
+    новый_бэклог = False
+    if (backlog is None and not a.backlog and not a.dry
+            and workdir.SESSION.is_dir()):
+        # Платформа: бэклога скилла здесь нет. Новый файл в рабочей папке
+        # сессии, и об этом сказано вслух — не путать с «переносить нечего».
+        backlog = workdir.state_dir(None, "находки") / f"БЭКЛОГ_{target}.md"
+        if not backlog.exists():
+            backlog.write_text(
+                f"# Находки для бэклога скилла {target}\n\n"
+                "Файл заведён в рабочей папке сессии: бэклога скилла здесь "
+                "нет. Передайте его владельцу скилла — он перенесёт записи "
+                "в БЭКЛОГ.md.\n\n", encoding="utf-8")
+            новый_бэклог = True
     if backlog is None or not backlog.exists():
         print(f"Не найден БЭКЛОГ.md скилла «{target}». Укажите путь: --бэклог <файл>")
         return 2
@@ -181,7 +209,7 @@ def main() -> int:
     if not fresh:
         return 1
 
-    bl = backlog.read_text(encoding="utf-8")
+    bl = workdir.read_path(backlog, "находки").read_text(encoding="utf-8")
     prefix, n = next_key(bl)
     today = dt.date.today().strftime("%d.%m.%Y")
     blocks, report = [], []
@@ -209,6 +237,11 @@ def main() -> int:
         print("\n".join(report))
         return 0
 
+    # Запись — туда, где можно писать: исходный бэклог, если он доступен,
+    # иначе его копия в рабочей папке сессии (`workdir.py`).
+    исходный = backlog
+    backlog = workdir.write_path(исходный, "находки")
+
     if "## Закрытое" in bl:
         bl = bl.replace("## Закрытое", "".join(blocks) + "## Закрытое", 1)
     else:
@@ -224,11 +257,20 @@ def main() -> int:
             if "**Статус:**" in block else block.rstrip() + \
             f"\n**Статус:** перенесена в бэклог скилла {today}\n"
         text = text[:s] + block + text[e:]
+    исходные_находки = src
+    src = workdir.write_path(src, "находки")
     src.write_text(text, encoding="utf-8")
 
     print(f"Перенесено находок: {len(fresh)}")
     print("\n".join(report))
     print(f"\nБэклог скилла: {backlog}")
+    if новый_бэклог:
+        print("Бэклога скилла здесь нет — заведён новый файл в рабочей папке "
+              "сессии. Передайте его владельцу скилла.")
+    for путь, источник in ((backlog, исходный), (src, исходные_находки)):
+        сказать = workdir.where(путь, источник)
+        if сказать:
+            print(сказать)
     return 0
 
 

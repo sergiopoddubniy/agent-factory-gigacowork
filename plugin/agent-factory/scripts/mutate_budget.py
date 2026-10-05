@@ -46,10 +46,10 @@ MUT = [
 
 
 def _soften(d: pathlib.Path) -> None:
-    """Оркестратор фабрики — SKILL.md плюс references/pipelines/*.md (как в
+    """Оркестратор фабрики — SKILL.md плюс references/pipeline_*.md (как в
     mutate_landed): смягчается всё вместе, иначе директивные пайплайны
     держат долю сильных маркеров выше порога и мутация выглядит пропущенной."""
-    for p in [d / "SKILL.md"] + sorted((d / "references" / "pipelines").glob("*.md")):
+    for p in [d / "SKILL.md"] + sorted((d / "references").glob("pipeline_*.md")):
         p.write_text(re.sub(r"обязательн|должен|нельзя|запрещ|всегда|никогда", "желательно",
                             p.read_text(encoding="utf-8")), encoding="utf-8")
 

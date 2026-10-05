@@ -109,7 +109,8 @@ def main() -> int:
             flagged.append((p.name, b, "ОШИБКА")); err += 1
         elif a > W_REF:
             flagged.append((p.name, b, "предупреждение")); warn += 1
-    print(f"\nreferences/ — читаются по мере надобности, не все сразу")
+    print()
+    print("references/ — читаются по мере надобности, не все сразу")
     print(f"  файлов: {len(refs)}, суммарно {tm:,} токенов"
           + ("" if exact else f" ({tl:,}–{th:,})"))
     print(f"  пороги суммы: предупреждение {W_ALL:,}, ошибка {E_ALL:,}"

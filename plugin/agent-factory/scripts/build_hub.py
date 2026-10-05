@@ -31,6 +31,17 @@
 проверяет заголовки plugin.yaml, навыка, агента и команд и отсутствие
 `.pyc`/`__pycache__` в архиве; нарушение — красный код.
 
+Раскладка навыка в витрине — по конвенции каталога: справочники в папке
+`Референсы/` одним уровнем (пайплайны режимов — `Референсы/pipeline_*.md`,
+шаблоны спецификации и прогона — `Референсы/*.template.md`), без вложенных
+папок; данные скриптов — база шаблонов и копилка реестра — не в
+справочниках, а рядом: `agent_templates/` и `knowledge/` («хранилище данных
+в референсах» стандарт относит к анти-паттернам; писать на платформе всё
+равно можно только в `/session`, см. `workdir.py`). Пути в тексте и в коде
+переписываются при сборке (`relayout`), а сборка сама проверяет, что
+`references/` в витрине не осталось и каждая ссылка на `Референсы/` ведёт к
+файлу. Репозиторий остаётся в прежней раскладке: это мастерская консультанта.
+
 Коды возврата: 0 — собрано и всё зелёное; 1 — шлюз или проверки красные;
 2 — ошибка входа.
 """
@@ -69,6 +80,41 @@ PLATFORM_DOMAIN = re.compile(r"\bcowork\.ru\b")
 
 CODE_LINE = re.compile(r"[\"']")   # строка кода со строковым литералом — не трогаем (фикстуры, регулярки)
 
+# --- раскладка витрины: «Референсы/» одним уровнем, данные — рядом ----------
+REFS_HUB = "Референсы"
+DATA_DIRS = ("knowledge", "agent_templates")
+RAW_FILES = {"hub_gate.py", "build_hub.py"}   # инструменты репозитория: копируются как есть
+LAYOUT_RULES = [
+    # данные скриптов выходят из справочников
+    (re.compile(r'"references"\s*/\s*"(knowledge|agent_templates)"'), r'"\1"'),
+    (re.compile(r"\breferences/(knowledge|agent_templates)(?![.\w])"), r"\1"),
+    # шаблоны спецификации и прогона — в справочники
+    (re.compile(r"\btemplates/(?=[^\s`)]*\.template\.md)"), REFS_HUB + "/"),
+    (re.compile(r"шаблон в `templates/`"), f"шаблон в `{REFS_HUB}/`"),
+    # сами справочники
+    (re.compile(r"\breferences\b"), REFS_HUB),
+]
+
+
+def hub_rel(rel: Path) -> Path:
+    """Путь файла скилла в витрине."""
+    parts = rel.parts
+    if parts and parts[0] == "references":
+        if len(parts) > 2 and parts[1] in DATA_DIRS:
+            return Path(*parts[1:])
+        return Path(REFS_HUB, *parts[1:])
+    if len(parts) == 2 and parts[0] == "templates" and parts[1].endswith(".template.md"):
+        return Path(REFS_HUB, parts[1])
+    return rel
+
+
+def relayout(text: str) -> tuple[str, int]:
+    n_total = 0
+    for rx, repl in LAYOUT_RULES:
+        text, n = rx.subn(repl, text)
+        n_total += n
+    return text, n_total
+
 
 def _scrub_line(ln: str, code: bool, stats: dict) -> str:
     if code and CODE_LINE.search(ln):
@@ -103,29 +149,15 @@ def scrub(text: str, code: bool = False) -> tuple[str, dict]:
     return t, stats
 
 
-# --- команды в формате витрины ----------------------------------------------
-def hub_command(src: Path) -> str:
-    """Команда витрины: фронтматтер name (русское имя из заголовка «# /имя»),
-    description (из summary), тело — как в плагине, без шапки версии."""
-    s = src.read_text(encoding="utf-8")
-    fm = re.match(r"^---\n(.*?)\n---\n", s, re.S)
-    meta = {}
-    if fm:
-        for ln in fm.group(1).splitlines():
-            k, _, v = ln.partition(":")
-            meta[k.strip()] = v.strip()
-        body = s[fm.end():]
-    else:
-        body = s
-    title = re.search(r"^#\s*/?(\S+)\s*$", body, re.M)
-    human = {"новый-агент": "Новый агент", "ворота": "Ворота готовности", "план-добора": "План добора",
-             "собрать": "Сборка пакета", "комплект": "Комплект поставки", "приёмка": "Приёмка",
-             "результат": "Результат", "портфель": "Портфель агентов", "пилот": "Пилот"}
-    name = human.get(title.group(1) if title else "", (title.group(1) if title else src.stem).replace("-", " ").capitalize())
-    body = re.sub(r"^#\s*/?\S+\s*\n+", "", body, count=1, flags=re.M)
-    body = re.sub(r"^\*\*Версия:\*\*[^\n]*\n+", "", body, count=1, flags=re.M)
-    desc = meta.get("summary", "").strip().rstrip(".")
-    return f"---\nname: {name}\ndescription: {desc}\n---\n\n{body.strip()}\n"
+# --- команды витрины -----------------------------------------------------------
+# Витрина — Фабрика для обычного пользователя: три короткие команды с
+# параметрами `${…}` из `templates/hub/commands/` (путь пользователя,
+# `pipeline_user_path.md`). Девять команд консультанта остаются в
+# репозитории и в папке навыка как сценарии для модели, но в каталог
+# команд пространства не выносятся.
+HUB_COMMANDS = ("new-agent.md", "improve-agent.md", "release-agent.md")
+ARG = re.compile(r"\$\{([^}]*)\}")
+CMD_BODY_MAX = 12       # строк тела: команда — короткий запуск, правила — в навыке
 
 
 HUB_TEMPLATES_README = """# База шаблонов агентов — состав
@@ -169,23 +201,25 @@ def copy_skill(dst: Path, stats: dict, with_examples: bool = False) -> None:
             stats["референсов_снято"] = stats.get("референсов_снято", 0) + (1 if p.is_file() else 0)
             continue
         if p.is_dir():
-            (dst / rel).mkdir(parents=True, exist_ok=True)
-            continue
-        (dst / rel).parent.mkdir(parents=True, exist_ok=True)
-        if p.suffix.lower() in TEXT_EXT and p.name != "hub_gate.py" and p.name != "build_hub.py":
+            continue                      # папки создаются под файлы: пустых в витрине нет
+        out = dst / hub_rel(rel)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if p.suffix.lower() in TEXT_EXT and p.name not in RAW_FILES:
             try:
                 text = p.read_text(encoding="utf-8")
             except UnicodeDecodeError:
-                shutil.copyfile(p, dst / rel)
+                shutil.copyfile(p, out)
                 continue
             t, st = scrub(text, code=p.suffix.lower() in (".py", ".js"))
             for k, v in st.items():
                 stats[k] = stats.get(k, 0) + v
+            t, n = relayout(t)
+            stats["путей_переписано"] = stats.get("путей_переписано", 0) + n
             if t != text:
                 stats["файлов_изменено"] = stats.get("файлов_изменено", 0) + 1
-            (dst / rel).write_text(t, encoding="utf-8")
+            out.write_text(t, encoding="utf-8")
         else:
-            shutil.copyfile(p, dst / rel)
+            shutil.copyfile(p, out)
 
 
 def fill(template: Path, **kw) -> str:
@@ -266,6 +300,49 @@ def _plain_problems(where: str, value: str) -> list[str]:
     return out
 
 
+LINK_REFS = re.compile(REFS_HUB + r"/([^`\s)\]»\"',;]+)")
+
+
+def hub_layout_problems(hub: Path) -> list[str]:
+    """Раскладка навыка: «Референсы/» одним уровнем, `references/` не осталось,
+    каждая ссылка на справочник ведёт к файлу."""
+    probs: list[str] = []
+    for sk in sorted(d for d in (hub / "skills").iterdir() if d.is_dir()):
+        name = f"skills/{sk.name}"
+        refs = sk / REFS_HUB
+        for old in ("references", "templates"):
+            if (sk / old).exists():
+                probs.append(f"{name}: папка {old}/ — справочники и шаблоны лежат в {REFS_HUB}/")
+        if not refs.is_dir():
+            probs.append(f"{name}: нет папки {REFS_HUB}/")
+            continue
+        nested = sorted(p.name for p in refs.iterdir() if p.is_dir())
+        if nested:
+            probs.append(f"{name}/{REFS_HUB}: вложенные папки {', '.join(nested)} — ссылки только на один уровень")
+        leftovers, broken = [], set()
+        for f in sorted(sk.rglob("*")):
+            if not f.is_file() or f.suffix.lower() not in TEXT_EXT or f.name in RAW_FILES:
+                continue
+            text = f.read_text(encoding="utf-8", errors="replace")
+            if re.search(r"\breferences\b|references/", text):
+                leftovers.append(str(f.relative_to(sk)))
+            if f.suffix.lower() != ".md":
+                continue
+            for m in LINK_REFS.finditer(text):
+                target = m.group(1).rstrip(".")
+                if "*" in target or "<" in target or not target.endswith(".md"):
+                    continue
+                if "/" in target:
+                    broken.add(f"{REFS_HUB}/{target} (вложенный путь)")
+                elif not (refs / target).is_file():
+                    broken.add(f"{REFS_HUB}/{target}")
+        if leftovers:
+            probs.append(f"{name}: «references» осталось в {len(leftovers)} файлах: {', '.join(leftovers[:4])}")
+        if broken:
+            probs.append(f"{name}: ссылки на справочники не ведут к файлу — {', '.join(sorted(broken)[:5])}")
+    return probs
+
+
 def hub_contract_problems(hub: Path) -> list[str]:
     """Проверка заголовков витрины по стандарту каталога — до упаковки."""
     probs: list[str] = []
@@ -301,12 +378,36 @@ def hub_contract_problems(hub: Path) -> list[str]:
         alien = [u for u in used if u not in skills]
         if not used or alien:
             probs.append(f"agents/{a.name}: skills должен ссылаться только на навыки плагина ({', '.join(skills)})")
+    n_args = 0
     for c in sorted((hub / "commands").glob("*.md")):
-        d = skill_header.parse(c.read_text(encoding="utf-8").split("---", 2)[1])
+        text = c.read_text(encoding="utf-8")
+        d = skill_header.parse(text.split("---", 2)[1])
         if not d.get("name"):
             probs.append(f"commands/{c.name}: нет name")
         probs += [x for x in _plain_problems(f"commands/{c.name}: description", d.get("description", ""))
                   if "триггер" not in x]
+        body = [ln for ln in text.split("---", 2)[2].splitlines() if ln.strip()]
+        if not body or len(body) > CMD_BODY_MAX:
+            probs.append(f"commands/{c.name}: тело {len(body)} строк — нужен короткий запуск (1–{CMD_BODY_MAX})")
+        args = ARG.findall(text)
+        n_args += len(args)
+        bad = [x for x in args if not re.fullmatch(r"[a-zа-яё_]+", x)]
+        if bad:
+            probs.append(f"commands/{c.name}: параметры ${{…}} — строчные буквы и «_»: {', '.join(bad)}")
+    if not n_args:
+        probs.append("commands: ни одной команды с параметром ${…}")
+    probs += hub_layout_problems(hub)
+    for f in ("plugin.yaml", "README.md", "agent.html", "agents/agent-factory.md", *[f"commands/{c}" for c in HUB_COMMANDS]):
+        if (hub / f).exists() and re.search(r"\{\{\w+\}\}", (hub / f).read_text(encoding="utf-8")):
+            probs.append(f"{f}: незаполненный шаблон {{{{…}}}}")
+    for f in ("README.md", "agent.html"):
+        t = (hub / f).read_text(encoding="utf-8") if (hub / f).exists() else ""
+        # Нейтральное оформление: системные шрифты, без подключаемых шрифтов и
+        # без токенов внутренней дизайн-системы (префикс --gc-).
+        quoted = [q for decl in re.findall(r"font-family\s*:([^;}]*)", t)
+                  for q in re.findall(r'"([^"]+)"', decl) if q != "Segoe UI"]
+        if re.search(r"@font-face|--gc-", t) or quoted:
+            probs.append(f"{f}: подключаемые шрифты или внутренние токены оформления — витрина в нейтральном стиле")
     junk = [str(p.relative_to(hub)) for p in hub.rglob("*") if p.suffix == ".pyc" or p.name == "__pycache__"]
     if junk:
         probs.append(f"в витрине есть .pyc/__pycache__: {len(junk)}")
@@ -344,13 +445,13 @@ def main(argv=None) -> int:
         run([sys.executable, "scripts/templates.py", "--индекс"], skill)
         # описание базы в репозитории перечисляет шаблоны — в витрине их нет, и описание
         # обязано говорить то же, что лежит рядом, а не то, что лежит в репозитории
-        (skill / "references" / "agent_templates" / "00_ЧТО_ЗДЕСЬ_И_ЧЕГО_ЗДЕСЬ_НЕТ.md").write_text(
-            HUB_TEMPLATES_README, encoding="utf-8")
+        (skill / "agent_templates" / "00_ЧТО_ЗДЕСЬ_И_ЧЕГО_ЗДЕСЬ_НЕТ.md").write_text(
+            relayout(HUB_TEMPLATES_README)[0], encoding="utf-8")
         skill_text = (skill / "SKILL.md").read_text(encoding="utf-8")
         skill_text = re.sub(r"^\| `examples/1c-dev-assistant/` \|[^\n]*\n", "", skill_text, flags=re.M)
         (skill / "SKILL.md").write_text(skill_text, encoding="utf-8")
     # копилки — пустые по политике: реестр и журнал остаются файлами, но без записей
-    reg = skill / "references" / "knowledge" / "registry.yaml"
+    reg = skill / "knowledge" / "registry.yaml"
     if reg.exists():
         head = [ln for ln in reg.read_text(encoding="utf-8").splitlines() if ln.startswith("#")]
         reg.write_text("\n".join(head + ["[]"]) + "\n", encoding="utf-8")
@@ -359,14 +460,24 @@ def main(argv=None) -> int:
     cmds_dir = hub / "commands"
     cmds_dir.mkdir()
     n_cmd = 0
-    for c in sorted((PLUGIN / "commands").glob("*.md")):
-        (cmds_dir / c.name).write_text(hub_command(c), encoding="utf-8")
+    for name in HUB_COMMANDS:
+        (cmds_dir / name).write_text((PLUGIN / "templates" / "hub" / "commands" / name).read_text(encoding="utf-8"),
+                                     encoding="utf-8")
         n_cmd += 1
     # обёртка
     tpl = PLUGIN / "templates" / "hub"
-    refs = [p for p in (PLUGIN / "references").glob("*.md")] + [p for p in (PLUGIN / "references" / "pipelines").glob("*.md")]
+    refs = [p for p in (PLUGIN / "references").glob("*.md")] + []
     scripts = [p for p in (PLUGIN / "scripts").glob("*.py")]
-    kw = dict(refs=len(refs), scripts=len(scripts), version=version, version_num=version_num, commands=n_cmd, date=args.date)
+    # Уровни агента — из того же источника, что паспорт и путь пользователя:
+    # «пилот» в описании витрины значит то же, что в паспорте агента.
+    from build_user_package import УРОВНИ
+    import html as _html
+    levels_table = "\n".join(["   | Уровень | Что это | Что нужно |", "   |---|---|---|"]
+                             + [f"   | {k} | {v[0]} | {v[1]} |" for k, v in УРОВНИ.items()])
+    levels_rows = "\n      ".join(f"<tr><td>{_html.escape(k)}</td><td>{_html.escape(v[0])}</td>"
+                                  f"<td>{_html.escape(v[1])}</td></tr>" for k, v in УРОВНИ.items())
+    kw = dict(refs=len(refs), scripts=len(scripts), version=version, version_num=version_num, commands=n_cmd,
+              date=args.date, levels_table=levels_table, levels_rows=levels_rows)
     (hub / "plugin.yaml").write_text(fill(tpl / "plugin.yaml", **kw), encoding="utf-8")
     (hub / "agents").mkdir()
     (hub / "agents" / "agent-factory.md").write_text(fill(tpl / "agent.md", **kw), encoding="utf-8")
@@ -414,6 +525,7 @@ def main(argv=None) -> int:
     report = [f"# Сборка витрины — Фабрика агентов GigaCowork {version}", "",
               f"- Дата: {args.date}", f"- Источник: `plugin/agent-factory` (SKILL.md {version})",
               f"- Раскладка: plugin.yaml · agents/agent-factory.md · commands/ ({n_cmd}) · skills/agent-factory/ · agent.html · README.md",
+              f"- Навык: SKILL.md · {REFS_HUB}/ одним уровнем · scripts/ · данные скриптов agent_templates/ и knowledge/; путей переписано {stats.get('путей_переписано', 0)}",
               f"- Файлов: {n_files}, из них с кириллицей в пути: {cyr} (архив с именами в UTF-8, собран Python zipfile)",
               f"- Справочников: {len(refs)} · скриптов: {len(scripts)}",
               f"- Вырезано провенанса: дат {stats.get('даты', 0)}, коротких дат у псевдонимов {stats.get('даты_у_псевдонима', 0)}, "
@@ -423,7 +535,7 @@ def main(argv=None) -> int:
               f"- Шлюз обезличивания (строгий): {gate_line}",
               f"- selftest внутри сборки: {self_line}",
               f"- selftest_delivery внутри сборки: {deliv_line}",
-              f"- Заголовки по стандарту каталога (plugin.yaml, навык, агент, команды) и архив без .pyc: {contract_line}",
+              f"- Заголовки по стандарту каталога (plugin.yaml, навык, агент, команды), раскладка «{REFS_HUB}/» и архив без .pyc: {contract_line}",
               f"- Архив: `{zip_path.name}` · SHA-256 {sha}", ""]
     if contract:
         report += ["## Нарушения стандарта каталога", ""] + [f"- {x}" for x in contract] + [""]
