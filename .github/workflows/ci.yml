@@ -21,6 +21,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      # PyYAML читают реестр агентов и сверка комплекта; на платформе он
+      # предустановлен, на раннере — нет (причина красного CI до V3.5).
+      - name: Зависимости (PyYAML)
+        run: python3 -m pip install --quiet pyyaml
       - name: Фабрика — selftest (134 проверки)
         run: python3 scripts/selftest.py
       - name: Исходный скилл — selftest_delivery (414 проверок)
@@ -44,6 +48,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Зависимости (PyYAML)
+        run: python3 -m pip install --quiet pyyaml
       - name: mutate_landed (иглы находок)
         run: python3 scripts/mutate_landed.py
       - name: mutate_build (порча сборщика)
@@ -65,6 +71,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Зависимости (PyYAML)
+        run: python3 -m pip install --quiet pyyaml
       - name: Шлюз запретов на репозитории (мягкий режим)
         run: python3 scripts/hub_gate.py --папка . --мягко
       - name: Сборка витрины (без референсов) + строгий шлюз + проверки внутри
