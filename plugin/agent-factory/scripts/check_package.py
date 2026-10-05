@@ -33,6 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from factory_common import EXIT_INPUT, EXIT_OK, EXIT_RED, nfc, parse_spec  # noqa: E402
+import skill_header  # noqa: E402
 
 REQUIRED_SECTIONS = [
     "Назначение", "Пользователь и триггер", "In-scope", "Out-of-scope",
@@ -61,40 +62,34 @@ def frontmatter(text: str) -> str | None:
 
 
 def skill_frontmatter_problems(text: str) -> list:
+    """Заголовок навыка по контракту загрузки (skill_header.py) + служебные поля Фабрики.
+
+    Поля, которые читает платформа, — name, description, category, version,
+    tags (проба на стенде 05.10.2026). Служебные — id, версия агента,
+    обновлено, спецификация: импорт их пропускает, а сверка комплекта и
+    история версий на них опираются.
+    """
     fm = frontmatter(text)
     if fm is None:
         return ["SKILL.md: нет YAML-фронтматтера"]
     fm = nfc(fm)
-    problems = []
-    name = re.search(r'^\s*имя навыка:\s*["\']?(.+?)["\']?\s*$', fm, re.M | re.I)
-    if not name:
-        problems.append("SKILL.md: нет поля «имя навыка» (обязательное поле формы «Создать навык»)")
-    elif not re.search(r"[А-Яа-яЁё]", name.group(1)):
-        problems.append(f"SKILL.md: «имя навыка: {name.group(1)}» — имя видит пользователь в "
-                        "каталоге, оно должно быть на его языке, а не слагом")
-    when = re.search(r"^\s*когда применять:\s*(.*)$", fm, re.M | re.I)
-    if not when:
-        problems.append("SKILL.md: нет поля «когда применять» — по нему агент решает, брать навык или нет")
-    else:
-        body = when.group(1).strip().lstrip("|>-").strip() or fm[when.end():].strip()
-        if len(body) < 80:
-            problems.append("SKILL.md: «когда применять» короче 80 знаков — это условие отбора, "
-                            "а не пересказ названия")
-        elif "не бери" not in body.lower() and "не брать" not in body.lower():
-            problems.append("SKILL.md: «когда применять» без второй части «Не бери навык, если …» — "
-                            "навык без границ подхватывается на соседних запросах")
-    if re.search(r"^\s*summary:", fm, re.M):
-        problems.append("SKILL.md: поле «summary» в форме платформы отсутствует и расходится с "
-                        "«когда применять»")
+    problems = ["SKILL.md: " + x for x in skill_header.problems(fm)]
     if not re.search(r"^\s*id:\s*[a-z0-9]+(-[a-z0-9]+)+\s*$", fm, re.M):
         problems.append("SKILL.md: нет ключа id вида <клиент>-<джоба>")
-    if not re.search(r"^\s*версия агента:\s*V\d+", fm, re.M | re.I):
+    vm = re.search(r"^\s*версия агента:\s*V(\d+)", fm, re.M | re.I)
+    if not vm:
         problems.append("SKILL.md: нет поля «версия агента: V<N>» (Я20)")
+    else:
+        num = skill_header.parse(fm).get("version", "")
+        if num.isdigit() and int(num) != int(vm.group(1)):
+            problems.append(f"SKILL.md: version: {num} ≠ «версия агента: V{vm.group(1)}» — "
+                            "платформа и человек видят разные версии")
     if not re.search(r"^\s*обновлено:\s*\d{4}-\d{2}-\d{2}", fm, re.M | re.I):
         problems.append("SKILL.md: нет поля «обновлено: ГГГГ-ММ-ДД»")
     if not re.search(r"^\s*спецификация:\s*\S+", fm, re.M | re.I):
         problems.append("SKILL.md: нет ссылки на спецификацию «спецификация: <id> · <версия> · "
                         "<отпечаток>» — пакет должен быть порождён из спецификации")
+    problems += ["SKILL.md: " + x for x in skill_header.body_triggers_problems(text)]
     return problems
 
 
@@ -103,7 +98,7 @@ def command_has_frontmatter(text: str) -> bool:
     if fm is None:
         return False
     return (re.search(r'^\s*name:\s*["\']?run-agent["\']?\s*$', fm, re.M) is not None
-            and "version:" in fm and "summary:" in fm)
+            and re.search(r"^\s*description:\s*\S", fm, re.M) is not None)
 
 
 def audit_texts(skill_text: str, command_text: str, slug: str) -> dict:
@@ -113,7 +108,7 @@ def audit_texts(skill_text: str, command_text: str, slug: str) -> dict:
         findings.append(f"slug «{slug}» не в kebab-case (латиница, дефисы)")
     findings.extend(skill_frontmatter_problems(skill_text))
     if not command_has_frontmatter(command_text):
-        findings.append("run-agent.md: отсутствует или неполный фронтматтер (name: run-agent, summary, version)")
+        findings.append("run-agent.md: отсутствует или неполный фронтматтер (name: run-agent, description)")
 
     low = skill_text.lower()
     headings = [re.sub(r"^#+\s*(\d+[.)]\s*)?", "", ln).strip().lower()

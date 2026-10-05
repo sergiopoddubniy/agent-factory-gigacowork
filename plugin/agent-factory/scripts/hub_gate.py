@@ -51,9 +51,10 @@ RULES_B = [  # провенанс — только для витрины
 ]
 STOP_PLATFORM = ("Сбер", "СДБ", "Пулково", "GigaChat")  # внутренние названия — везде
 
-# Орг-формы в синтетике примера — разрешённые названия (пример 1С и прогон консолидации).
+# Орг-формы в синтетике примеров и псевдонимы политики обезличивания (docs/06) — разрешены.
 ORG_ALLOW = ("Северный порт", "Порт-Логистика", "Порт-Сервис", "Порт-Логистик", "Пример-Контрагент",
              "Порт Сервис", "Северный Порт")
+ORG_ALLOW_RX = re.compile(r"Клиент-[А-Я]\b|Заказчик(?:-[А-Я])?\b|Компания [А-Я]\b|Пример|«N»|«Х»|«X»")
 
 
 def nfc(s: str) -> str:
@@ -85,13 +86,19 @@ def scan(root: Path, strict: bool, stopwords: list[str]) -> list[tuple[str, int,
                         # версии и числа вида 3.10 / 1.0 ru — не домены
                         if re.fullmatch(r"[\d.]+\.(ru|com|su|io|net|org|рф)", d):
                             continue
-                    if name == "ОРГ-ФОРМА" and any(a in frag for a in ORG_ALLOW):
+                    if name == "ОРГ-ФОРМА" and (any(a in frag for a in ORG_ALLOW) or ORG_ALLOW_RX.search(frag)):
                         continue
                     if name == "СУММА" and re.search(r"токен", ln, re.I):
                         continue  # «1,47 млн токенов» — замер, не сумма сделки
                     hits.append((rel, i, name, frag.strip()))
             for w in STOP_PLATFORM + tuple(stopwords):
-                if w and w in ln:
+                # Стоп-слово — начало слова, а не любая подстрока: короткое название
+                # внутри длинного обычного слова — не имя. Строка «re:<регулярка>» — для случаев,
+                # где и начала мало: имя совпадает с началом обычного слова.
+                if not w:
+                    continue
+                rx = w[3:] if w.startswith("re:") else r"(?<!\w)" + re.escape(w)
+                if re.search(rx, ln):
                     hits.append((rel, i, "СТОП-СЛОВО", w))
     return hits
 

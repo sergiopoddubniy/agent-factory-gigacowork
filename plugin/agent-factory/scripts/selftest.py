@@ -306,6 +306,9 @@ def main() -> int:
               and not any(p.is_dir() for p in (hub / "skills/agent-factory/references/agent_templates").iterdir())
               and "Шаблонов: **0**" in (hub / "skills/agent-factory/references/agent_templates/ИНДЕКС.md").read_text(encoding="utf-8")
               and "examples/1c-dev-assistant" not in (hub / "skills/agent-factory/SKILL.md").read_text(encoding="utf-8"))
+        hub_tpl_readme = (hub / "skills/agent-factory/references/agent_templates/00_ЧТО_ЗДЕСЬ_И_ЧЕГО_ЗДЕСЬ_НЕТ.md").read_text(encoding="utf-8")
+        check("витрина: описание базы шаблонов говорит о пустой базе, а не перечисляет шаблоны репозитория",
+              "пуста намеренно" in hub_tpl_readme and "Логистика/" not in hub_tpl_readme and "Клиент-" not in hub_tpl_readme)
         r = run("build_hub.py", "--out", str(tmp / "hub_ex"), "--no-check", "--version", "V0", "--с-примерами")
         check("витрина: --с-примерами возвращает пример и шаблон",
               r.returncode == 0 and (tmp / "hub_ex/hub/agent-factory/skills/agent-factory/examples/1c-dev-assistant/AGENT_SPEC.md").is_file())
@@ -491,6 +494,22 @@ def main() -> int:
         check("порт: agent_registry.py --lint (реестр реализованных агентов читается)", r.returncode == 0, r.stdout[-300:])
         r = run("templates.py", "--lint")
         check("порт: templates.py --lint (база шаблонов читается)", r.returncode == 0, r.stdout[-300:])
+        база = ROOT / "references" / "agent_templates"
+        карты = sorted(база.rglob("КАРТА_ПЕРЕНОСА.md"))
+        неполные = [str(k.parent.name) for k in карты
+                    if not all(g in k.read_text(encoding="utf-8")
+                               for g in ("**Заменить обязательно**", "**Не трогать**", "Происхождение:"))]
+        навыки = [p for p in база.rglob("00_Навык_*.md")]
+        без_происхождения = [p.parent.name for p in навыки
+                             if not re.search(r"^происхождение:\s*(синтетика|обезличено)\s*$",
+                                              p.read_text(encoding="utf-8").split("\n---\n", 1)[0], re.M)]
+        check("база шаблонов: у каждого навыка — происхождение синтетика|обезличено и карта переноса в три графы",
+              len(навыки) >= 2 and len(карты) == len(навыки) and not неполные and not без_происхождения,
+              f"навыков {len(навыки)}, карт {len(карты)}, неполные {неполные}, без происхождения {без_происхождения}")
+        r = run("templates.py", "--похожие", "проверить поставщика перед договором")
+        top = re.search(r"^\s+\[\s*[\d.]+\]\s+(\S+)", r.stdout, re.M)
+        check("база шаблонов: поиск по джобе находит шаблон по смыслу (проверка контрагента — первым)",
+              r.returncode == 0 and top is not None and top.group(1) == "kontragent-proverka", r.stdout[-400:])
         r = run("agent_registry.py", "--похожие", "подготовить техническое задание по запросу")
         check("порт: agent_registry.py --похожие отвечает (пустая выдача — тоже ответ)", r.returncode == 0, r.stdout[-300:])
         r = run("token_budget.py", str(ROOT))

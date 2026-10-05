@@ -2,7 +2,7 @@
   "spec": "demo-1c-dev-assistant",
   "fingerprint": "e603b8ee",
   "version": "V5",
-  "sha256": "8aa65508c863c8689e19a88be065bcaef440ca423ebce244e59ff7a44ae4bd1f",
+  "sha256": "12fddb23e2a650836820cfaa8541cefda61998271a027d783bc0638c5f71670c",
   "audit": "PASS",
   "delivery": "PASS (ядро 55/55, надстройка «демонстрация» 11/11)"
 }

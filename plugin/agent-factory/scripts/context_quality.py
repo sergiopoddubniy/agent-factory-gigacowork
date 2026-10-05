@@ -256,7 +256,7 @@ def assess(agent: Path, cards_dir: Path | None = None,
         a.add("границы записи заданы явно",
               bool(re.search(r"только чтени|не пишешь|write.back|external_write", whole)))
         a.add("названы конкретные вызовы, а не «инструмент вообще»",
-              bool(re.search(r"[a-z_]{4,}\(|basis_|_balance|_card\b", whole)))
+              bool(re.search(r"[a-z_]{4,}\(|registry_|_balance|_card\b", whole)))
     else:
         # Агент без коннектора — не хуже агента с коннектором, если это
         # названо вслух. Раньше такая ось давала треть от возможного и

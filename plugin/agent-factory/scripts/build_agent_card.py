@@ -220,13 +220,13 @@ def audit(skill_text: str, card_text: str, instr_text: str, cmd_text: str,
         findings.append(finding(
             "SKILL_FRONTMATTER_MISSING", BLOCKING,
             "В SKILL.md нет YAML-фронтматтера",
-            "Добавь в начало файла блок между --- с полями name, summary, "
-            "version. Без него навык не опознаётся платформой, хотя текст "
-            "выглядит целым.",
+            "Добавь в начало файла блок между --- с полями name, description, "
+            "category, version, tags. Без него навык не опознаётся платформой, "
+            "хотя текст выглядит целым.",
             where={"file": "SKILL.md"}))
     else:
         fm = skill_text.lstrip().split("---", 2)[1]
-        miss = [k for k in ("name:", "summary:", "version:") if k not in fm]
+        miss = [k for k in ("name:", "description:", "version:") if k not in fm]
         if miss:
             findings.append(finding(
                 "SKILL_FRONTMATTER_INCOMPLETE", BLOCKING,

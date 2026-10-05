@@ -22,8 +22,8 @@ https://github.com/sergiopoddubniy/agent-factory-gigacowork — всё, что �
 
 ## Перед сохранением любой правки
 
-1. `python3 plugin/agent-factory/scripts/selftest.py` — код 0 (118 проверок);
-   `python3 plugin/agent-factory/scripts/selftest_delivery.py` — 411/411.
+1. `python3 plugin/agent-factory/scripts/selftest.py` — код 0 (121 проверка);
+   `python3 plugin/agent-factory/scripts/selftest_delivery.py` — 412/412.
    После правки справочников — `scripts/mutate_landed.py` (иглы находок),
    после правки сборщика — `scripts/mutate_build.py`, после правки
    оркестратора — `scripts/mutate_budget.py` (4/4).
@@ -44,6 +44,13 @@ https://github.com/sergiopoddubniy/agent-factory-gigacowork — всё, что �
 - Новые уроки пишутся по `docs/06_Политика_обезличивания.md`: правило
   отдельно, повод — фразой «Повод: …», суммы относительные, домены
   `example-*.ru`.
+- Новый шаблон в `references/agent_templates/<функция>/<slug>/`: во
+  фронтматтере навыка — `роль`, `джоба`, `когда применять`,
+  `происхождение: синтетика|обезличено`; рядом `КАРТА_ПЕРЕНОСА.md` в три
+  графы; затем `scripts/templates.py --индекс` и `--lint`. Шлюз не видит
+  одиночных фамилий, номеров документов клиента и абсолютных цифр в
+  «контрольных цифрах» — их ищут глазами (`docs/06`, раздел «Как
+  проверяется»).
 
 ## Запреты
 

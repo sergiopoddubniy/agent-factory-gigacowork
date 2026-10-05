@@ -37,6 +37,7 @@ from factory_common import (  # noqa: E402
     workspace_skills, boundary_rows, core_kind,
 )
 from check_package import audit_package, render as render_audit  # noqa: E402
+import skill_header  # noqa: E402
 from spec_readiness import check as readiness_check, render as render_readiness  # noqa: E402
 
 ZIP_TIMESTAMP = (2020, 1, 1, 0, 0, 0)
@@ -63,6 +64,50 @@ def _when_to_apply(spec: Spec) -> str:
     return (f"  Пользователь принёс {inputs} и просит: {trigger}. "
             f"Также — когда он задаёт уточняющие вопросы по этой работе.\n\n"
             f"  Не бери навык, если запрос про: {not_take} — это не задачи этого навыка.")
+
+
+def _short(item: str) -> str:
+    """Пункт списка без пояснения: до первого тире, скобки, двоеточия или точки с запятой."""
+    return re.split(r"\s[—–]\s|\s-\s|\(|;|:", item, 1)[0].strip().rstrip(".")
+
+
+def _description(spec: Spec) -> str:
+    """Поле `description` — одна строка. Платформа кладёт его в «Когда применять».
+
+    Что делает (триггер), на каком входе, что выдаёт и чего не брать — в одной
+    plain-строке без «: »: так её принимает и форма пространства, и каталог.
+    Полный текст условий — в разделе «Когда использовать (триггеры)» тела.
+    """
+    b5, b6, b7 = spec.block(5), spec.block(6), spec.block(7)
+    trigger = (b5.field_value("Триггер") or spec.fm("имя агента") or "").strip().rstrip(".")
+    trigger = trigger[:1].upper() + trigger[1:]
+    ins, outs = io_lists(b6)
+    _, outside = scope_lists(b7)
+    weak = {"с", "со", "по", "к", "ко", "и", "в", "во", "на", "из", "для", "о", "об",
+            "от", "до", "за", "у", "а", "или", "либо", "к", "при", "без", "под", "над"}
+
+    def clip(t: str, n: int) -> str:
+        t = t.strip()
+        if len(t) <= n:
+            return t
+        words = t[:n].rsplit(" ", 1)[0].rstrip(",;—– ").split()
+        while words and words[-1].lower() in weak:
+            words.pop()
+        return " ".join(words)
+
+    # Отрицательная часть идёт последней и не обрезается: без неё навык
+    # подхватывается на соседних запросах (skill_header.NEGATIVE).
+    neg = "Не брать навык — " + ("; ".join(clip(_short(x), 70) for x in outside[:2])
+                                 if outside else "смежные задачи вне периметра")
+    parts = [clip(trigger, 170)]
+    if ins:
+        parts.append("Вход — " + ", ".join(clip(_short(x), 50) for x in ins[:3]))
+    if outs:
+        parts.append("Результат — " + ", ".join(clip(_short(x), 45) for x in outs[:3]))
+    neg = skill_header.plain_line(neg, 200)
+    pos = skill_header.plain_line(". ".join(p for p in parts if p),
+                                  skill_header.DESC_MAX - len(neg) - 2)
+    return pos.rstrip(".") + ". " + neg
 
 
 CHECKLIST_STATUSES = "`закрыто` / `вопрос` / `конфликт`"
@@ -266,7 +311,7 @@ def render_skill(spec: Spec, version: str, today: str, num: int = 1) -> str:
     inside, outside = scope_lists(b7)
     access = spec.fm("уровень доступа") or "L0"
     contour = spec.fm("контур") or "demo"
-    category = spec.fm("категория") or "Без категории"
+    category = skill_header.category_value(spec.fm("категория"))
     hypothesis = "; ".join(f"{f}: {b3.field_value(f)}" for f in ("Метрика", "Бейзлайн", "Цель")
                            if b3.field_value(f)) or "не задана (см. спецификацию, блок 3)"
     ears = ears_lines(b9)
@@ -275,10 +320,21 @@ def render_skill(spec: Spec, version: str, today: str, num: int = 1) -> str:
     n_cl = len(cl)
     assumptions = [a for n in spec.blocks for a in spec.block(n).assumptions]
 
-    fm = (f"---\nid: {spec.slug}\nимя навыка: {name}\nкогда применять: |\n{_when_to_apply(spec)}\n"
-          f"категория: {category}\nверсия агента: {version}\nобновлено: {today}\n"
+    # Заголовок по контракту загрузки навыка (skill_header.py): name, description,
+    # category, version, tags читает платформа; id, версия агента, обновлено и
+    # спецификация — служебные поля Фабрики, импорт их пропускает.
+    tags = skill_header.tags_line(spec.slug, spec.fm("теги") or "")
+    fm = ("---\n"
+          f"name: {skill_header.plain_line(name, 120)}\n"
+          f"description: {_description(spec)}\n"
+          f"category: {category}\n"
+          f"version: {skill_header.version_number(version)}\n"
+          f"tags: {tags}\n"
+          f"id: {spec.slug}\n"
+          f"версия агента: {version}\nобновлено: {today}\n"
           f"спецификация: {spec.slug} · {spec.fm('версия спецификации')} · {spec.fp}\n"
-          f"version: 1.0.0\n---\n")
+          "---\n")
+    when = "\n".join(ln.strip() for ln in _when_to_apply(spec).splitlines())
 
     s = [fm, f"# {name}", ""]
     s += ["## 1. Назначение", "",
@@ -288,7 +344,8 @@ def render_skill(spec: Spec, version: str, today: str, num: int = 1) -> str:
           f"Уровень доступа: {access} — {ACCESS_TEXT.get(access, '')}.", ""]
     s += ["## 2. Пользователь и триггер", "",
           f"- Роль: {b5.field_value('Роль') or '—'}",
-          f"- Триггер: {b5.field_value('Триггер') or '—'}", ""]
+          f"- Триггер: {b5.field_value('Триггер') or '—'}", "",
+          f"### {skill_header.TRIGGERS_TITLE}", "", when, ""]
     s += ["## 3. In-scope", "", _list(inside), ""]
     s += ["## 4. Out-of-scope", "", _list(outside),
           "", "Запрос вне периметра: назвать границу, сказать, что агент этого не делает, и "
@@ -422,8 +479,7 @@ def render_command(spec: Spec, version: str, today: str) -> str:
     contour = spec.fm("контур") or "demo"
     return f"""---
 name: run-agent
-summary: Запуск агента «{name}».
-version: 1.0.0
+description: Запуск агента «{name}» — полный порядок выполнения из навыка
 ---
 
 # /{spec.slug}

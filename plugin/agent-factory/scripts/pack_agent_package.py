@@ -39,6 +39,9 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import skill_header  # noqa: E402
+
 DEFAULT_WORK = Path(tempfile.gettempdir()) / "_agent_build"
 
 # Фиксированная метка времени в архиве: иначе SHA-256 меняется на каждой
@@ -142,54 +145,24 @@ def frontmatter(text: str) -> str | None:
 
 
 def skill_frontmatter_problems(text: str) -> list[str]:
-    """Фронтматтер `SKILL.md` повторяет форму «Создать навык» в GigaCowork.
+    """Заголовок `SKILL.md` — по контракту загрузки навыка (skill_header.py).
 
-    Поля формы: «Имя навыка» (обязательное), «Когда применять»
-    (обязательное), «Категория» (необязательное), «Инструкции»
-    (обязательное — это тело файла). Фронтматтер называет их теми же
-    словами, чтобы сборщик переносил значения в форму один в один, ничего
-    не переводя по дороге.
-
-    До 25.08 здесь требовалось `name: 00-agent-skill` и `summary:` — это была
-    наша выдумка, а не поле платформы, и она пережила несколько ревизий
-    только потому, что проверялась нашим же скриптом. Урок общий:
-    инструмент, написанный по тому же предположению, подтверждает
-    предположение, а не реальность.
+    Проба на стенде 05.10.2026: форма «Создать навык» при загрузке файла
+    берёт `name` → «Имя навыка», `description` → «Когда применять», тело →
+    «Инструкции». Прежние русские ключи (`имя навыка`, `когда применять`)
+    форма не читала — поля оставались пустыми. До 25.08 здесь требовалось
+    `name: 00-agent-skill` и `summary:`; потом — русские ключи по экрану
+    формы. Оба раза проверка подтверждала наше же предположение. Урок общий:
+    формат проверяется загрузкой файла на стенде, а не нашим шаблоном.
     """
     fm = frontmatter(text)
     if fm is None:
         return ["SKILL.md: нет YAML-фронтматтера"]
-
-    # Ключи содержат «й» и «ё»: в NFD они разложены на букву и диакритику, и
-    # регулярное выражение по составленной форме их не находит. Файл,
-    # сохранённый на macOS, приходит именно в NFD. Приводим к NFC до разбора.
+    # Ключи содержат «й» и «ё»: в NFD они разложены на букву и диакритику —
+    # файл, сохранённый на macOS, приходит именно так. Приводим к NFC.
     fm = _nfc(fm)
-    problems = []
-    name = re.search(r'^\s*имя навыка:\s*["\']?(.+?)["\']?\s*$', fm, re.M | re.I)
-    if not name:
-        problems.append("SKILL.md: нет поля «имя навыка» — это обязательное "
-                        "поле формы «Создать навык»")
-    elif not re.search(r"[А-Яа-яЁё]", name.group(1)):
-        problems.append(f"SKILL.md: «имя навыка: {name.group(1)}» — это имя "
-                        "видит пользователь в каталоге навыков, оно должно быть "
-                        "на языке пользователя, а не служебным слагом")
-
-    when = re.search(r'^\s*когда применять:\s*(.*)$', fm, re.M | re.I)
-    if not when:
-        problems.append("SKILL.md: нет поля «когда применять» — обязательное "
-                        "поле формы; по нему агент решает, брать навык или нет")
-    else:
-        block = fm[when.end():]
-        body = when.group(1).strip().lstrip("|>-").strip() or block.strip()
-        if len(body) < 80:
-            problems.append("SKILL.md: «когда применять» слишком коротко — "
-                            "это условие отбора навыка («в каких случаях агент "
-                            "берёт навык»), а не пересказ названия")
-
-    if re.search(r"^\s*summary:", fm, re.M):
-        problems.append("SKILL.md: поле «summary» в форме платформы отсутствует; "
-                        "оно не переносится никуда и расходится с «когда применять»")
-    return problems
+    return (["SKILL.md: " + x for x in skill_header.problems(fm)]
+            + ["SKILL.md: " + x for x in skill_header.body_triggers_problems(text)])
 
 
 def has_frontmatter(text: str, expected_name: str) -> bool:
@@ -200,7 +173,7 @@ def has_frontmatter(text: str, expected_name: str) -> bool:
     name_ok = re.search(
         r'^\s*name:\s*["\']?' + re.escape(expected_name) + r'["\']?\s*$',
         fm, re.M) is not None
-    return name_ok and "version:" in fm and "summary:" in fm
+    return name_ok and re.search(r"^\s*description:\s*\S", fm, re.M) is not None
 
 
 # Разделы вспомогательного навыка. Их мало и они другие: справочный навык
@@ -251,7 +224,7 @@ def audit(skill_text: str, command_text: str, slug: str) -> dict:
     findings.extend(skill_frontmatter_problems(skill_text))
     if not has_frontmatter(command_text, "run-agent"):
         findings.append("run-agent.md: отсутствует или неполный YAML-фронтматтер "
-                        "(нужны name: run-agent, summary, version)")
+                        "(нужны name: run-agent, description)")
 
     # Н-4. Раздел ищется как ЗАГОЛОВОК, а не как строка где угодно в тексте.
     # Пока проверялось вхождение подстроки, вырезанный целиком раздел

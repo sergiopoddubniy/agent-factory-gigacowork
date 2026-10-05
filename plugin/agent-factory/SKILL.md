@@ -17,8 +17,8 @@ id: agent-factory
   фабрика делает агентов, не программы; если нужен только расчёт
   финансового эффекта — это скилл `feo-ai-methodology`.
 категория: Фабрика агентов
-версия агента: V3.3
-обновлено: 2026-09-25
+версия агента: V3.4
+обновлено: 2026-09-28
 version: 1.0.0
 ---
 
@@ -224,6 +224,7 @@ version: 1.0.0
 `init_client_project.py` папка клиента · `pack_agent_package.py`,
 `build_agent_card.py` унаследованные пакеты · `docx_writer.py`,
 `xlsx_writer.py`, `docx_helpers.js` документы · `factory_common.py` разбор
-спецификации, `textnorm.py` нормализация текста (общие модули) · `token_budget.py`,
+спецификации, `skill_header.py` заголовок навыка по контракту загрузки,
+`textnorm.py` нормализация текста (общие модули) · `token_budget.py`,
 `audit_findings.py`, `promote_finding.py`, `mutate_*.py`, `selftest.py`,
 `selftest_delivery.py` — сам скилл.
